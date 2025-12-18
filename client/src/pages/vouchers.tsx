@@ -1,11 +1,12 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useRef } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
@@ -22,6 +23,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Plus,
   Search,
   FileText,
@@ -29,9 +37,19 @@ import {
   XCircle,
   Clock,
   Download,
+  Upload,
+  Paperclip,
+  Trash2,
+  Eye,
+  User,
+  Calendar,
 } from "lucide-react";
 import { format } from "date-fns";
-import type { VoucherWithRelations } from "@shared/schema";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { isUnauthorizedError } from "@/lib/authUtils";
+import { useAuth } from "@/hooks/useAuth";
+import type { VoucherWithRelations, VoucherAttachment } from "@shared/schema";
 
 function formatCurrency(amount: string | number): string {
   return parseFloat(String(amount)).toLocaleString("en-US", {
@@ -66,13 +84,322 @@ function getStatusVariant(status: string): "default" | "secondary" | "outline" |
   }
 }
 
+interface VoucherDetailDialogProps {
+  voucher: VoucherWithRelations | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+function VoucherDetailDialog({ voucher, open, onOpenChange }: VoucherDetailDialogProps) {
+  const { toast } = useToast();
+  const { user } = useAuth();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const { data: attachments, isLoading: attachmentsLoading } = useQuery<VoucherAttachment[]>({
+    queryKey: [`/api/vouchers/${voucher?.id}/attachments`],
+    enabled: !!voucher,
+  });
+
+  const uploadAttachment = useMutation({
+    mutationFn: async (file: File) => {
+      if (!voucher) throw new Error("No voucher selected");
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(`/api/vouchers/${voucher.id}/attachments`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || "Upload failed");
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Attachment Uploaded",
+        description: "The file has been attached to this voucher.",
+      });
+      queryClient.invalidateQueries({ queryKey: [`/api/vouchers/${voucher?.id}/attachments`] });
+    },
+    onError: (error: Error) => {
+      if (isUnauthorizedError(error)) {
+        toast({
+          title: "Unauthorized",
+          description: "You are logged out. Logging in again...",
+          variant: "destructive",
+        });
+        setTimeout(() => window.location.href = "/api/login", 500);
+      } else {
+        toast({
+          title: "Upload Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+      }
+    },
+  });
+
+  const deleteAttachment = useMutation({
+    mutationFn: async (attachmentId: number) => {
+      if (!voucher) throw new Error("No voucher selected");
+      return await apiRequest("DELETE", `/api/vouchers/${voucher.id}/attachments/${attachmentId}`);
+    },
+    onSuccess: () => {
+      toast({
+        title: "Attachment Deleted",
+        description: "The file has been removed from this voucher.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/vouchers", voucher?.id, "attachments"] });
+    },
+    onError: (error: Error) => {
+      if (isUnauthorizedError(error)) {
+        toast({
+          title: "Unauthorized",
+          description: "You are logged out. Logging in again...",
+          variant: "destructive",
+        });
+        setTimeout(() => window.location.href = "/api/login", 500);
+      } else {
+        toast({
+          title: "Delete Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+      }
+    },
+  });
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      uploadAttachment.mutate(file);
+      e.target.value = "";
+    }
+  };
+
+  const canManageAttachments = user && (
+    user.role === "admin" ||
+    user.role === "cash_manager" ||
+    (voucher && voucher.requestedById === user.id)
+  );
+
+  if (!voucher) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-3">
+            <span className="font-mono">{voucher.voucherNumber}</span>
+            <Badge variant={getStatusVariant(voucher.status)} size="sm">
+              {getStatusIcon(voucher.status)}
+              <span className="ml-1">{voucher.status}</span>
+            </Badge>
+          </DialogTitle>
+          <DialogDescription>
+            Voucher details and attached documents
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-sm text-muted-foreground">Payee</p>
+              <p className="font-medium">{voucher.payee}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Date</p>
+              <p className="font-medium flex items-center gap-2">
+                <Calendar className="h-4 w-4 text-muted-foreground" />
+                {format(new Date(voucher.date), "MMMM d, yyyy")}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <p className="text-sm text-muted-foreground">Description</p>
+            <p className="font-medium">{voucher.description}</p>
+          </div>
+
+          <Separator />
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <p className="text-sm text-muted-foreground">Amount</p>
+              <p className="font-mono font-semibold text-lg">{formatCurrency(voucher.amount)}</p>
+            </div>
+            {voucher.vatAmount && (
+              <div>
+                <p className="text-sm text-muted-foreground">VAT</p>
+                <p className="font-mono">{formatCurrency(voucher.vatAmount)}</p>
+              </div>
+            )}
+            {voucher.amountNetOfVat && (
+              <div>
+                <p className="text-sm text-muted-foreground">Net of VAT</p>
+                <p className="font-mono">{formatCurrency(voucher.amountNetOfVat)}</p>
+              </div>
+            )}
+            {voucher.amountWithheld && (
+              <div>
+                <p className="text-sm text-muted-foreground">Withheld</p>
+                <p className="font-mono">{formatCurrency(voucher.amountWithheld)}</p>
+              </div>
+            )}
+          </div>
+
+          {voucher.invoiceNumber && (
+            <div>
+              <p className="text-sm text-muted-foreground">Invoice Number</p>
+              <p className="font-mono">{voucher.invoiceNumber}</p>
+            </div>
+          )}
+
+          <Separator />
+
+          <div className="grid grid-cols-2 gap-4">
+            {voucher.requester && (
+              <div>
+                <p className="text-sm text-muted-foreground flex items-center gap-1">
+                  <User className="h-3 w-3" /> Requested By
+                </p>
+                <p className="font-medium">
+                  {voucher.requester.firstName} {voucher.requester.lastName}
+                </p>
+              </div>
+            )}
+            {voucher.approver && (
+              <div>
+                <p className="text-sm text-muted-foreground flex items-center gap-1">
+                  <CheckCircle className="h-3 w-3" /> Approved By
+                </p>
+                <p className="font-medium">
+                  {voucher.approver.firstName} {voucher.approver.lastName}
+                </p>
+              </div>
+            )}
+          </div>
+
+          {voucher.chartOfAccount && (
+            <div>
+              <p className="text-sm text-muted-foreground">Chart of Account</p>
+              <p className="font-medium">
+                <span className="font-mono text-muted-foreground">{voucher.chartOfAccount.code}</span>
+                {" - "}{voucher.chartOfAccount.name}
+              </p>
+            </div>
+          )}
+
+          <Separator />
+
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-medium flex items-center gap-2">
+                <Paperclip className="h-4 w-4" />
+                Attachments
+              </h3>
+              {canManageAttachments && (
+                <>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileChange}
+                    className="hidden"
+                    accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx"
+                    data-testid="input-upload-attachment"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadAttachment.isPending}
+                    data-testid="button-upload-attachment"
+                  >
+                    <Upload className="h-4 w-4 mr-2" />
+                    {uploadAttachment.isPending ? "Uploading..." : "Upload"}
+                  </Button>
+                </>
+              )}
+            </div>
+
+            {attachmentsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : attachments && attachments.length > 0 ? (
+              <div className="space-y-2">
+                {attachments.map((attachment) => (
+                  <div
+                    key={attachment.id}
+                    className="flex items-center justify-between p-3 bg-muted/50 rounded-md"
+                    data-testid={`attachment-${attachment.id}`}
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="font-medium truncate">{attachment.originalFilename}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {format(new Date(attachment.uploadedAt), "MMM d, yyyy h:mm a")}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => window.open(`/api/attachments/${attachment.id}/download`, "_blank")}
+                        data-testid={`button-view-attachment-${attachment.id}`}
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                      {canManageAttachments && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => deleteAttachment.mutate(attachment.id)}
+                          disabled={deleteAttachment.isPending}
+                          data-testid={`button-delete-attachment-${attachment.id}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-muted-foreground">
+                <Paperclip className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                <p>No attachments yet</p>
+                {canManageAttachments && (
+                  <p className="text-sm mt-1">Upload receipts or invoices to support this voucher</p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Vouchers() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [selectedVoucher, setSelectedVoucher] = useState<VoucherWithRelations | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
 
   const { data: vouchers, isLoading } = useQuery<VoucherWithRelations[]>({
     queryKey: ["/api/vouchers", { status: statusFilter !== "all" ? statusFilter : undefined }],
   });
+
+  const handleRowClick = (voucher: VoucherWithRelations) => {
+    setSelectedVoucher(voucher);
+    setDetailOpen(true);
+  };
 
   const filteredVouchers = vouchers?.filter((v) => {
     const matchesSearch =
@@ -214,7 +541,8 @@ export default function Vouchers() {
                   {filteredVouchers.map((voucher) => (
                     <TableRow
                       key={voucher.id}
-                      className="hover-elevate"
+                      className="hover-elevate cursor-pointer"
+                      onClick={() => handleRowClick(voucher)}
                       data-testid={`row-voucher-${voucher.id}`}
                     >
                       <TableCell className="font-mono text-sm">
@@ -266,6 +594,12 @@ export default function Vouchers() {
           )}
         </CardContent>
       </Card>
+
+      <VoucherDetailDialog
+        voucher={selectedVoucher}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+      />
     </div>
   );
 }

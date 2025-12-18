@@ -6,6 +6,9 @@ import {
   Users,
   Settings,
   Wallet,
+  PiggyBank,
+  BarChart3,
+  History,
 } from "lucide-react";
 import {
   Sidebar,
@@ -30,11 +33,14 @@ const mainNavItems = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Vouchers", url: "/vouchers", icon: FileText },
   { title: "Replenishment", url: "/replenishment", icon: RefreshCw },
+  { title: "Budgets", url: "/budgets", icon: PiggyBank },
+  { title: "Reports", url: "/reports", icon: BarChart3 },
 ];
 
 const adminNavItems = [
   { title: "Users", url: "/users", icon: Users },
   { title: "Settings", url: "/settings", icon: Settings },
+  { title: "Audit Log", url: "/audit-log", icon: History },
 ];
 
 function getRoleLabel(role: string): string {

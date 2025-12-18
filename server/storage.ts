@@ -4,6 +4,9 @@ import {
   chartOfAccounts,
   pettyCashFund,
   replenishmentRequests,
+  auditLogs,
+  accountBudgets,
+  voucherAttachments,
   type User,
   type UpsertUser,
   type Voucher,
@@ -14,9 +17,15 @@ import {
   type InsertPettyCashFund,
   type ReplenishmentRequest,
   type InsertReplenishmentRequest,
+  type AuditLog,
+  type InsertAuditLog,
+  type AccountBudget,
+  type InsertAccountBudget,
+  type VoucherAttachment,
+  type InsertVoucherAttachment,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, sql, and, inArray } from "drizzle-orm";
+import { eq, desc, sql, and, inArray, gte, lte, between } from "drizzle-orm";
 
 export interface IStorage {
   // User operations
@@ -47,6 +56,24 @@ export interface IStorage {
   // Replenishment operations
   createReplenishmentRequest(request: InsertReplenishmentRequest): Promise<ReplenishmentRequest>;
   getReplenishmentRequests(): Promise<ReplenishmentRequest[]>;
+
+  // Audit log operations
+  createAuditLog(log: InsertAuditLog): Promise<AuditLog>;
+  getAuditLogs(entityType?: string, entityId?: string): Promise<any[]>;
+  getRecentAuditLogs(limit?: number): Promise<any[]>;
+
+  // Budget tracking operations
+  createAccountBudget(budget: InsertAccountBudget): Promise<AccountBudget>;
+  getAccountBudgets(): Promise<any[]>;
+  getAccountBudgetById(id: number): Promise<AccountBudget | undefined>;
+  updateAccountBudget(id: number, data: Partial<InsertAccountBudget>): Promise<AccountBudget | undefined>;
+  deleteAccountBudget(id: number): Promise<void>;
+  getBudgetSpending(chartOfAccountId: number, startDate: Date, endDate: Date): Promise<string>;
+
+  // Voucher attachment operations
+  createVoucherAttachment(attachment: InsertVoucherAttachment): Promise<VoucherAttachment>;
+  getVoucherAttachments(voucherId: number): Promise<VoucherAttachment[]>;
+  deleteVoucherAttachment(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -237,6 +264,152 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(replenishmentRequests)
       .orderBy(desc(replenishmentRequests.requestDate));
+  }
+
+  // Audit log operations
+  async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
+    const [created] = await db.insert(auditLogs).values(log).returning();
+    return created;
+  }
+
+  async getAuditLogs(entityType?: string, entityId?: string): Promise<any[]> {
+    let query = db.select().from(auditLogs);
+    
+    if (entityType && entityId) {
+      const logs = await db
+        .select()
+        .from(auditLogs)
+        .where(and(eq(auditLogs.entityType, entityType), eq(auditLogs.entityId, entityId)))
+        .orderBy(desc(auditLogs.timestamp));
+      
+      const result = [];
+      for (const log of logs) {
+        const user = log.userId ? await this.getUser(log.userId) : null;
+        result.push({ ...log, user });
+      }
+      return result;
+    } else if (entityType) {
+      const logs = await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.entityType, entityType))
+        .orderBy(desc(auditLogs.timestamp));
+      
+      const result = [];
+      for (const log of logs) {
+        const user = log.userId ? await this.getUser(log.userId) : null;
+        result.push({ ...log, user });
+      }
+      return result;
+    }
+    
+    const logs = await db.select().from(auditLogs).orderBy(desc(auditLogs.timestamp));
+    const result = [];
+    for (const log of logs) {
+      const user = log.userId ? await this.getUser(log.userId) : null;
+      result.push({ ...log, user });
+    }
+    return result;
+  }
+
+  async getRecentAuditLogs(limit: number = 50): Promise<any[]> {
+    const logs = await db
+      .select()
+      .from(auditLogs)
+      .orderBy(desc(auditLogs.timestamp))
+      .limit(limit);
+    
+    const result = [];
+    for (const log of logs) {
+      const user = log.userId ? await this.getUser(log.userId) : null;
+      result.push({ ...log, user });
+    }
+    return result;
+  }
+
+  // Budget tracking operations
+  async createAccountBudget(budget: InsertAccountBudget): Promise<AccountBudget> {
+    const [created] = await db.insert(accountBudgets).values(budget).returning();
+    return created;
+  }
+
+  async getAccountBudgets(): Promise<any[]> {
+    const budgets = await db
+      .select()
+      .from(accountBudgets)
+      .orderBy(accountBudgets.chartOfAccountId);
+    
+    const result = [];
+    for (const budget of budgets) {
+      const coa = await this.getChartOfAccountById(budget.chartOfAccountId);
+      const spending = await this.getBudgetSpending(
+        budget.chartOfAccountId,
+        budget.startDate,
+        budget.endDate
+      );
+      result.push({
+        ...budget,
+        chartOfAccount: coa,
+        currentSpending: spending,
+        percentageUsed: parseFloat(budget.budgetAmount) > 0 
+          ? (parseFloat(spending) / parseFloat(budget.budgetAmount) * 100).toFixed(2)
+          : "0",
+      });
+    }
+    return result;
+  }
+
+  async getAccountBudgetById(id: number): Promise<AccountBudget | undefined> {
+    const [budget] = await db.select().from(accountBudgets).where(eq(accountBudgets.id, id));
+    return budget;
+  }
+
+  async updateAccountBudget(id: number, data: Partial<InsertAccountBudget>): Promise<AccountBudget | undefined> {
+    const [updated] = await db
+      .update(accountBudgets)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(accountBudgets.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteAccountBudget(id: number): Promise<void> {
+    await db.delete(accountBudgets).where(eq(accountBudgets.id, id));
+  }
+
+  async getBudgetSpending(chartOfAccountId: number, startDate: Date, endDate: Date): Promise<string> {
+    const result = await db
+      .select({
+        total: sql<string>`COALESCE(SUM(${vouchers.amount}::numeric), 0)::text`,
+      })
+      .from(vouchers)
+      .where(
+        and(
+          eq(vouchers.chartOfAccountId, chartOfAccountId),
+          gte(vouchers.date, startDate),
+          lte(vouchers.date, endDate),
+          sql`${vouchers.status} != 'rejected'`
+        )
+      );
+    return result[0]?.total || "0";
+  }
+
+  // Voucher attachment operations
+  async createVoucherAttachment(attachment: InsertVoucherAttachment): Promise<VoucherAttachment> {
+    const [created] = await db.insert(voucherAttachments).values(attachment).returning();
+    return created;
+  }
+
+  async getVoucherAttachments(voucherId: number): Promise<VoucherAttachment[]> {
+    return await db
+      .select()
+      .from(voucherAttachments)
+      .where(eq(voucherAttachments.voucherId, voucherId))
+      .orderBy(desc(voucherAttachments.uploadedAt));
+  }
+
+  async deleteVoucherAttachment(id: number): Promise<void> {
+    await db.delete(voucherAttachments).where(eq(voucherAttachments.id, id));
   }
 }
 

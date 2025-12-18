@@ -136,6 +136,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       };
 
       const voucher = await storage.createVoucher(voucherData);
+
+      // Log voucher creation
+      await storage.createAuditLog({
+        entityType: "voucher",
+        entityId: voucher.id.toString(),
+        action: "created",
+        newValue: voucher,
+        userId,
+        description: `Created voucher ${voucher.voucherNumber} for ${req.body.payee} - ${req.body.amount}`,
+      });
+
       res.status(201).json(voucher);
     } catch (error) {
       console.error("Error creating voucher:", error);
@@ -148,10 +159,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { id } = req.params;
       const userId = req.user.claims.sub;
 
+      const oldVoucher = await storage.getVoucherById(parseInt(id));
       const voucher = await storage.updateVoucherStatus(parseInt(id), "approved", userId);
       if (!voucher) {
         return res.status(404).json({ message: "Voucher not found" });
       }
+
+      // Log approval
+      await storage.createAuditLog({
+        entityType: "voucher",
+        entityId: id,
+        action: "approved",
+        oldValue: { status: oldVoucher?.status },
+        newValue: { status: "approved", approvedById: userId },
+        userId,
+        description: `Approved voucher ${voucher.voucherNumber}`,
+      });
 
       res.json(voucher);
     } catch (error) {
@@ -165,10 +188,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { id } = req.params;
       const userId = req.user.claims.sub;
 
+      const oldVoucher = await storage.getVoucherById(parseInt(id));
       const voucher = await storage.updateVoucherStatus(parseInt(id), "rejected", userId);
       if (!voucher) {
         return res.status(404).json({ message: "Voucher not found" });
       }
+
+      // Log rejection
+      await storage.createAuditLog({
+        entityType: "voucher",
+        entityId: id,
+        action: "rejected",
+        oldValue: { status: oldVoucher?.status },
+        newValue: { status: "rejected", approvedById: userId },
+        userId,
+        description: `Rejected voucher ${voucher.voucherNumber}`,
+      });
 
       res.json(voucher);
     } catch (error) {
@@ -300,10 +335,302 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       };
 
       const request = await storage.createReplenishmentRequest(requestData);
+
+      // Log the replenishment action
+      await storage.createAuditLog({
+        entityType: "replenishment",
+        entityId: request.id.toString(),
+        action: "created",
+        newValue: request,
+        userId,
+        description: `Created replenishment request for ${req.body.voucherIds.length} vouchers totaling ${req.body.totalAmount}`,
+      });
+
       res.status(201).json(request);
     } catch (error) {
       console.error("Error creating replenishment request:", error);
       res.status(500).json({ message: "Failed to create replenishment request" });
+    }
+  });
+
+  // Audit log routes
+  app.get("/api/audit-logs", isAuthenticated, requireRole("cash_manager", "admin"), async (req, res) => {
+    try {
+      const { entityType, entityId, limit } = req.query;
+      
+      if (limit) {
+        const logs = await storage.getRecentAuditLogs(parseInt(limit as string));
+        return res.json(logs);
+      }
+      
+      const logs = await storage.getAuditLogs(
+        entityType as string | undefined,
+        entityId as string | undefined
+      );
+      res.json(logs);
+    } catch (error) {
+      console.error("Error fetching audit logs:", error);
+      res.status(500).json({ message: "Failed to fetch audit logs" });
+    }
+  });
+
+  // Budget tracking routes
+  app.get("/api/budgets", isAuthenticated, async (req, res) => {
+    try {
+      const budgets = await storage.getAccountBudgets();
+      res.json(budgets);
+    } catch (error) {
+      console.error("Error fetching budgets:", error);
+      res.status(500).json({ message: "Failed to fetch budgets" });
+    }
+  });
+
+  app.post("/api/budgets", isAuthenticated, requireRole("cash_manager", "admin"), async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      
+      if (!req.body.chartOfAccountId || !req.body.budgetAmount || !req.body.period || !req.body.startDate || !req.body.endDate) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      const budgetData = {
+        chartOfAccountId: parseInt(req.body.chartOfAccountId),
+        budgetAmount: req.body.budgetAmount,
+        period: req.body.period,
+        startDate: new Date(req.body.startDate),
+        endDate: new Date(req.body.endDate),
+        alertThreshold: req.body.alertThreshold || "80",
+      };
+
+      const budget = await storage.createAccountBudget(budgetData);
+
+      await storage.createAuditLog({
+        entityType: "budget",
+        entityId: budget.id.toString(),
+        action: "created",
+        newValue: budget,
+        userId,
+        description: `Created budget of ${req.body.budgetAmount} for account`,
+      });
+
+      res.status(201).json(budget);
+    } catch (error) {
+      console.error("Error creating budget:", error);
+      res.status(500).json({ message: "Failed to create budget" });
+    }
+  });
+
+  app.patch("/api/budgets/:id", isAuthenticated, requireRole("cash_manager", "admin"), async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      const oldBudget = await storage.getAccountBudgetById(parseInt(id));
+      const budget = await storage.updateAccountBudget(parseInt(id), req.body);
+      
+      if (!budget) {
+        return res.status(404).json({ message: "Budget not found" });
+      }
+
+      await storage.createAuditLog({
+        entityType: "budget",
+        entityId: id,
+        action: "updated",
+        oldValue: oldBudget,
+        newValue: budget,
+        userId,
+        description: `Updated budget`,
+      });
+
+      res.json(budget);
+    } catch (error) {
+      console.error("Error updating budget:", error);
+      res.status(500).json({ message: "Failed to update budget" });
+    }
+  });
+
+  app.delete("/api/budgets/:id", isAuthenticated, requireRole("cash_manager", "admin"), async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      await storage.deleteAccountBudget(parseInt(id));
+
+      await storage.createAuditLog({
+        entityType: "budget",
+        entityId: id,
+        action: "deleted",
+        userId,
+        description: `Deleted budget`,
+      });
+
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting budget:", error);
+      res.status(500).json({ message: "Failed to delete budget" });
+    }
+  });
+
+  // Voucher attachment routes
+  app.get("/api/vouchers/:id/attachments", isAuthenticated, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const attachments = await storage.getVoucherAttachments(parseInt(id));
+      res.json(attachments);
+    } catch (error) {
+      console.error("Error fetching attachments:", error);
+      res.status(500).json({ message: "Failed to fetch attachments" });
+    }
+  });
+
+  app.post("/api/vouchers/:id/attachments", isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      if (!req.body.fileName || !req.body.fileType || !req.body.fileData || !req.body.fileSize) {
+        return res.status(400).json({ message: "Missing required attachment fields" });
+      }
+
+      const attachmentData = {
+        voucherId: parseInt(id),
+        fileName: req.body.fileName,
+        fileType: req.body.fileType,
+        fileSize: req.body.fileSize,
+        fileData: req.body.fileData,
+        uploadedById: userId,
+      };
+
+      const attachment = await storage.createVoucherAttachment(attachmentData);
+
+      await storage.createAuditLog({
+        entityType: "voucher",
+        entityId: id,
+        action: "attachment_added",
+        newValue: { fileName: req.body.fileName, fileType: req.body.fileType },
+        userId,
+        description: `Added attachment: ${req.body.fileName}`,
+      });
+
+      res.status(201).json(attachment);
+    } catch (error) {
+      console.error("Error creating attachment:", error);
+      res.status(500).json({ message: "Failed to create attachment" });
+    }
+  });
+
+  app.delete("/api/attachments/:id", isAuthenticated, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      
+      await storage.deleteVoucherAttachment(parseInt(id));
+
+      await storage.createAuditLog({
+        entityType: "attachment",
+        entityId: id,
+        action: "deleted",
+        userId,
+        description: `Deleted attachment`,
+      });
+
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting attachment:", error);
+      res.status(500).json({ message: "Failed to delete attachment" });
+    }
+  });
+
+  // Disbursement summary reports route
+  app.get("/api/reports/disbursement-summary", isAuthenticated, async (req, res) => {
+    try {
+      const { startDate, endDate, groupBy } = req.query;
+      
+      const start = startDate ? new Date(startDate as string) : new Date(new Date().getFullYear(), 0, 1);
+      const end = endDate ? new Date(endDate as string) : new Date();
+      
+      const vouchers = await storage.getVouchersWithRelations();
+      
+      const filteredVouchers = vouchers.filter((v: any) => {
+        const voucherDate = new Date(v.date);
+        return voucherDate >= start && voucherDate <= end && v.status !== 'rejected';
+      });
+
+      // Group by chart of account if requested
+      const summary: any = {
+        totalAmount: 0,
+        totalVat: 0,
+        totalWithheld: 0,
+        totalNetAmount: 0,
+        voucherCount: filteredVouchers.length,
+        byAccount: {} as Record<string, any>,
+        byMonth: {} as Record<string, any>,
+      };
+
+      filteredVouchers.forEach((v: any) => {
+        const amount = parseFloat(v.amount) || 0;
+        const vat = parseFloat(v.vatAmount || "0");
+        const withheld = parseFloat(v.amountWithheld || "0");
+        const netAmount = parseFloat(v.amountNetOfVat || v.amount);
+
+        summary.totalAmount += amount;
+        summary.totalVat += vat;
+        summary.totalWithheld += withheld;
+        summary.totalNetAmount += netAmount;
+
+        // Group by account
+        const accountCode = v.chartOfAccount?.code || "Uncategorized";
+        if (!summary.byAccount[accountCode]) {
+          summary.byAccount[accountCode] = {
+            code: accountCode,
+            name: v.chartOfAccount?.name || "Uncategorized",
+            amount: 0,
+            vat: 0,
+            withheld: 0,
+            netAmount: 0,
+            count: 0,
+          };
+        }
+        summary.byAccount[accountCode].amount += amount;
+        summary.byAccount[accountCode].vat += vat;
+        summary.byAccount[accountCode].withheld += withheld;
+        summary.byAccount[accountCode].netAmount += netAmount;
+        summary.byAccount[accountCode].count += 1;
+
+        // Group by month
+        const monthKey = new Date(v.date).toISOString().slice(0, 7);
+        if (!summary.byMonth[monthKey]) {
+          summary.byMonth[monthKey] = {
+            month: monthKey,
+            amount: 0,
+            vat: 0,
+            withheld: 0,
+            netAmount: 0,
+            count: 0,
+          };
+        }
+        summary.byMonth[monthKey].amount += amount;
+        summary.byMonth[monthKey].vat += vat;
+        summary.byMonth[monthKey].withheld += withheld;
+        summary.byMonth[monthKey].netAmount += netAmount;
+        summary.byMonth[monthKey].count += 1;
+      });
+
+      res.json({
+        period: { startDate: start, endDate: end },
+        summary: {
+          totalAmount: summary.totalAmount.toFixed(2),
+          totalVat: summary.totalVat.toFixed(2),
+          totalWithheld: summary.totalWithheld.toFixed(2),
+          totalNetAmount: summary.totalNetAmount.toFixed(2),
+          voucherCount: summary.voucherCount,
+        },
+        byAccount: Object.values(summary.byAccount),
+        byMonth: Object.values(summary.byMonth).sort((a: any, b: any) => a.month.localeCompare(b.month)),
+      });
+    } catch (error) {
+      console.error("Error generating disbursement summary:", error);
+      res.status(500).json({ message: "Failed to generate disbursement summary" });
     }
   });
 

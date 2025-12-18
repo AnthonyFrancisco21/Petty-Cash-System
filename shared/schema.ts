@@ -123,6 +123,70 @@ export const replenishmentRequests = pgTable("replenishment_requests", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Audit Log for tracking all changes
+export const auditLogs = pgTable("audit_logs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  entityType: varchar("entity_type", { length: 50 }).notNull(), // 'voucher', 'fund', 'user', etc.
+  entityId: varchar("entity_id", { length: 100 }).notNull(),
+  action: varchar("action", { length: 50 }).notNull(), // 'created', 'updated', 'approved', 'rejected', etc.
+  oldValue: jsonb("old_value"),
+  newValue: jsonb("new_value"),
+  userId: varchar("user_id").references(() => users.id),
+  ipAddress: varchar("ip_address", { length: 50 }),
+  timestamp: timestamp("timestamp").notNull().defaultNow(),
+  description: text("description"),
+});
+
+export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
+  user: one(users, {
+    fields: [auditLogs.userId],
+    references: [users.id],
+  }),
+}));
+
+// Budget tracking per chart of account
+export const accountBudgets = pgTable("account_budgets", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  chartOfAccountId: integer("chart_of_account_id").notNull().references(() => chartOfAccounts.id),
+  budgetAmount: decimal("budget_amount", { precision: 15, scale: 2 }).notNull(),
+  period: varchar("period", { length: 20 }).notNull(), // 'monthly', 'quarterly', 'yearly'
+  startDate: timestamp("start_date").notNull(),
+  endDate: timestamp("end_date").notNull(),
+  alertThreshold: decimal("alert_threshold", { precision: 5, scale: 2 }).default("80"), // percentage
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const accountBudgetsRelations = relations(accountBudgets, ({ one }) => ({
+  chartOfAccount: one(chartOfAccounts, {
+    fields: [accountBudgets.chartOfAccountId],
+    references: [chartOfAccounts.id],
+  }),
+}));
+
+// Document attachments for vouchers
+export const voucherAttachments = pgTable("voucher_attachments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  voucherId: integer("voucher_id").notNull().references(() => vouchers.id),
+  fileName: varchar("file_name", { length: 255 }).notNull(),
+  fileType: varchar("file_type", { length: 100 }).notNull(),
+  fileSize: integer("file_size").notNull(),
+  fileData: text("file_data").notNull(), // base64 encoded
+  uploadedById: varchar("uploaded_by_id").references(() => users.id),
+  uploadedAt: timestamp("uploaded_at").notNull().defaultNow(),
+});
+
+export const voucherAttachmentsRelations = relations(voucherAttachments, ({ one }) => ({
+  voucher: one(vouchers, {
+    fields: [voucherAttachments.voucherId],
+    references: [vouchers.id],
+  }),
+  uploadedBy: one(users, {
+    fields: [voucherAttachments.uploadedById],
+    references: [users.id],
+  }),
+}));
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).omit({
   createdAt: true,
@@ -152,6 +216,22 @@ export const insertReplenishmentRequestSchema = createInsertSchema(replenishment
   createdAt: true,
 });
 
+export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({
+  id: true,
+  timestamp: true,
+});
+
+export const insertAccountBudgetSchema = createInsertSchema(accountBudgets).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertVoucherAttachmentSchema = createInsertSchema(voucherAttachments).omit({
+  id: true,
+  uploadedAt: true,
+});
+
 // Types
 export type UpsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
@@ -164,10 +244,24 @@ export type PettyCashFund = typeof pettyCashFund.$inferSelect;
 export type InsertPettyCashFund = z.infer<typeof insertPettyCashFundSchema>;
 export type ReplenishmentRequest = typeof replenishmentRequests.$inferSelect;
 export type InsertReplenishmentRequest = z.infer<typeof insertReplenishmentRequestSchema>;
+export type AuditLog = typeof auditLogs.$inferSelect;
+export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
+export type AccountBudget = typeof accountBudgets.$inferSelect;
+export type InsertAccountBudget = z.infer<typeof insertAccountBudgetSchema>;
+export type VoucherAttachment = typeof voucherAttachments.$inferSelect;
+export type InsertVoucherAttachment = z.infer<typeof insertVoucherAttachmentSchema>;
 
 // Extended types with relations
 export type VoucherWithRelations = Voucher & {
   requester?: User | null;
   approver?: User | null;
+  chartOfAccount?: ChartOfAccount | null;
+};
+
+export type AuditLogWithUser = AuditLog & {
+  user?: User | null;
+};
+
+export type AccountBudgetWithAccount = AccountBudget & {
   chartOfAccount?: ChartOfAccount | null;
 };

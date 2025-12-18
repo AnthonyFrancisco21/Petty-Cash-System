@@ -19,6 +19,9 @@ import VoucherForm from "@/pages/voucher-form";
 import Replenishment from "@/pages/replenishment";
 import UsersPage from "@/pages/users";
 import SettingsPage from "@/pages/settings";
+import AuditLog from "@/pages/audit-log";
+import Budgets from "@/pages/budgets";
+import Reports from "@/pages/reports";
 
 function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -82,8 +85,11 @@ function Router() {
         <Route path="/vouchers" component={Vouchers} />
         <Route path="/vouchers/new" component={VoucherForm} />
         <Route path="/replenishment" component={Replenishment} />
+        <Route path="/budgets" component={Budgets} />
+        <Route path="/reports" component={Reports} />
         {isAdmin && <Route path="/users" component={UsersPage} />}
         {isAdmin && <Route path="/settings" component={SettingsPage} />}
+        {isAdmin && <Route path="/audit-log" component={AuditLog} />}
         <Route component={NotFound} />
       </Switch>
     </AuthenticatedLayout>
