@@ -752,7 +752,8 @@ export async function registerRoutes(app: Express): Promise<void> {
             .json({ message: "Database error checking voucher" });
         }
 
-        const fs = require("fs").promises;
+        const fsPromises = require("fs").promises;
+        const fs = require("fs");
         const path = require("path");
 
         // Generate unique filename
@@ -764,13 +765,23 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.log(`Generated file path: ${filePath}`);
         console.log(`Temp file location: ${req.file.path}`);
 
-        // Move file from temp location to permanent location
+        // Move file from temp location to permanent location. Handle cross-device rename.
         try {
-          await fs.rename(req.file.path, filePath);
+          await fsPromises.rename(req.file.path, filePath);
           console.log("File moved successfully");
-        } catch (fileError) {
-          console.error("Error moving file:", fileError);
-          return res.status(500).json({ message: "Failed to save file" });
+        } catch (fileError: any) {
+          console.warn(
+            "Rename failed, attempting copy+unlink fallback:",
+            fileError?.code
+          );
+          try {
+            await fsPromises.copyFile(req.file.path, filePath);
+            await fsPromises.unlink(req.file.path);
+            console.log("File copied and temp removed successfully");
+          } catch (copyError) {
+            console.error("Error saving file (copy fallback):", copyError);
+            return res.status(500).json({ message: "Failed to save file" });
+          }
         }
 
         const attachmentData = {
@@ -817,6 +828,35 @@ export async function registerRoutes(app: Express): Promise<void> {
       } catch (error) {
         console.error("Error creating attachment:", error);
         res.status(500).json({ message: "Failed to create attachment" });
+      }
+    }
+  );
+
+  // Allow deleting an attachment using voucher-scoped URL (client expects this)
+  app.delete(
+    "/api/vouchers/:id/attachments/:attachmentId",
+    isAuthenticated,
+    async (req: any, res: any) => {
+      try {
+        const { attachmentId } = req.params;
+        const userIdRaw = req.user.id;
+        const userId =
+          typeof userIdRaw === "string" ? parseInt(userIdRaw) : userIdRaw;
+
+        await storage.deleteVoucherAttachment(parseInt(attachmentId));
+
+        await storage.createAuditLog({
+          entityType: "attachment",
+          entityId: attachmentId,
+          action: "deleted",
+          userId,
+          description: `Deleted attachment ${attachmentId}`,
+        });
+
+        res.status(204).send();
+      } catch (error) {
+        console.error("Error deleting attachment:", error);
+        res.status(500).json({ message: "Failed to delete attachment" });
       }
     }
   );
