@@ -1,17 +1,26 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Wallet, FileText, CheckCircle, RefreshCw, Shield, BarChart3 } from "lucide-react";
+import {
+  Wallet,
+  FileText,
+  CheckCircle,
+  RefreshCw,
+  Shield,
+  BarChart3,
+} from "lucide-react";
 
 const features = [
   {
     icon: FileText,
     title: "Voucher Management",
-    description: "Create and track petty cash vouchers with complete audit trail",
+    description:
+      "Create and track petty cash vouchers with complete audit trail",
   },
   {
     icon: CheckCircle,
     title: "Approval Workflow",
-    description: "Online request submission and approval for transparent operations",
+    description:
+      "Online request submission and approval for transparent operations",
   },
   {
     icon: RefreshCw,
@@ -21,17 +30,19 @@ const features = [
   {
     icon: Shield,
     title: "Role-Based Access",
-    description: "Secure access control for cash managers, requesters, and approvers",
+    description: "Secure access control for cash managers and requesters",
   },
   {
     icon: BarChart3,
     title: "Chart of Accounts",
-    description: "Track disbursements by account code for proper financial reporting",
+    description:
+      "Track disbursements by account code for proper financial reporting",
   },
   {
     icon: Wallet,
     title: "Fund Tracking",
-    description: "Real-time visibility into petty cash balance and depletion status",
+    description:
+      "Real-time visibility into petty cash balance and depletion status",
   },
 ];
 
@@ -46,8 +57,8 @@ export default function Landing() {
             </div>
             <span className="text-xl font-semibold">P CashManager</span>
           </div>
-          <a href="/api/login">
-            <Button data-testid="button-login">Sign In</Button>
+          <a href="/auth">
+            <Button data-testid="button-login">Log In</Button>
           </a>
         </div>
       </header>
@@ -61,16 +72,21 @@ export default function Landing() {
               <span className="text-muted-foreground">Made Simple</span>
             </h1>
             <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              A comprehensive solution for managing your company's petty cash imprest fund.
-              Track disbursements, manage approvals, and generate replenishment reports with ease.
+              A comprehensive solution for managing your company's petty cash
+              imprest fund. Track disbursements, manage approvals, and generate
+              replenishment reports with ease.
             </p>
             <div className="flex flex-wrap items-center justify-center gap-4 pt-4">
-              <a href="/api/login">
+              <a href="/auth">
                 <Button size="lg" data-testid="button-get-started">
                   Get Started
                 </Button>
               </a>
-              <Button variant="outline" size="lg" data-testid="button-learn-more">
+              <Button
+                variant="outline"
+                size="lg"
+                data-testid="button-learn-more"
+              >
                 Learn More
               </Button>
             </div>
@@ -84,7 +100,8 @@ export default function Landing() {
                 Everything You Need
               </h2>
               <p className="text-muted-foreground max-w-xl mx-auto">
-                Streamline your petty cash operations with powerful features designed for efficiency
+                Streamline your petty cash operations with powerful features
+                designed for efficiency
               </p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -113,7 +130,7 @@ export default function Landing() {
             <p className="text-muted-foreground">
               Sign in to start managing your petty cash fund today
             </p>
-            <a href="/api/login">
+            <a href="/auth">
               <Button size="lg" data-testid="button-sign-in-cta">
                 Sign In Now
               </Button>

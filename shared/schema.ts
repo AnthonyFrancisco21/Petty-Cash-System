@@ -8,35 +8,24 @@ import {
   integer,
   index,
   jsonb,
+  serial,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Session storage table for Replit Auth
-export const sessions = pgTable(
-  "sessions",
-  {
-    sid: varchar("sid").primaryKey(),
-    sess: jsonb("sess").notNull(),
-    expire: timestamp("expire").notNull(),
-  },
-  (table) => [index("IDX_session_expire").on(table.expire)]
-);
+// 1. Updated Users table with password field
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  username: text("username").notNull().unique(),
+  password: text("password").notNull(), // Added password field
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  role: text("role").notNull().default("preparer"), // preparer, approver, admin
+  createdAt: timestamp("created_at").defaultNow(),
+});
 
 // User roles
-export type UserRole = "cash_manager" | "requester" | "approver" | "admin";
-
-// Users table with role-based access
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  email: varchar("email").unique(),
-  firstName: varchar("first_name"),
-  lastName: varchar("last_name"),
-  profileImageUrl: varchar("profile_image_url"),
-  role: varchar("role", { length: 50 }).notNull().default("requester"),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
+export type UserRole = "preparer" | "approver" | "admin";
 
 export const usersRelations = relations(users, ({ many }) => ({
   requestedVouchers: many(vouchers, { relationName: "requester" }),
@@ -52,16 +41,25 @@ export const chartOfAccounts = pgTable("chart_of_accounts", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-export const chartOfAccountsRelations = relations(chartOfAccounts, ({ many }) => ({
-  vouchers: many(vouchers),
-}));
+export const chartOfAccountsRelations = relations(
+  chartOfAccounts,
+  ({ many }) => ({
+    vouchers: many(vouchers),
+  })
+);
 
 // Petty Cash Fund configuration
 export const pettyCashFund = pgTable("petty_cash_fund", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  imprestAmount: decimal("imprest_amount", { precision: 15, scale: 2 }).notNull(),
-  currentBalance: decimal("current_balance", { precision: 15, scale: 2 }).notNull(),
-  managerId: varchar("manager_id").references(() => users.id),
+  imprestAmount: decimal("imprest_amount", {
+    precision: 15,
+    scale: 2,
+  }).notNull(),
+  currentBalance: decimal("current_balance", {
+    precision: 15,
+    scale: 2,
+  }).notNull(),
+  managerId: integer("manager_id").references(() => users.id),
   lastReplenishmentDate: timestamp("last_replenishment_date"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -70,28 +68,39 @@ export const pettyCashFund = pgTable("petty_cash_fund", {
 // Voucher status
 export type VoucherStatus = "pending" | "approved" | "rejected" | "replenished";
 
-// Petty Cash Vouchers
+// Petty Cash Vouchers (Header)
 export const vouchers = pgTable("vouchers", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   voucherNumber: varchar("voucher_number", { length: 50 }).notNull().unique(),
   date: timestamp("date").notNull(),
   payee: varchar("payee", { length: 255 }).notNull(),
-  description: text("description").notNull(),
-  amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
-  invoiceNumber: varchar("invoice_number", { length: 100 }),
-  amountNetOfVat: decimal("amount_net_of_vat", { precision: 15, scale: 2 }),
-  vatAmount: decimal("vat_amount", { precision: 15, scale: 2 }),
-  amountWithheld: decimal("amount_withheld", { precision: 15, scale: 2 }),
-  chartOfAccountId: integer("chart_of_account_id").references(() => chartOfAccounts.id),
-  requestedById: varchar("requested_by_id").references(() => users.id),
-  approvedById: varchar("approved_by_id").references(() => users.id),
+  totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).notNull(),
+  requestedById: integer("requested_by_id").references(() => users.id),
+  approvedById: integer("approved_by_id").references(() => users.id),
   status: varchar("status", { length: 20 }).notNull().default("pending"),
   supportingDocsSubmitted: timestamp("supporting_docs_submitted"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-export const vouchersRelations = relations(vouchers, ({ one }) => ({
+// Voucher Items (Details)
+export const voucherItems = pgTable("voucher_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  voucherId: integer("voucher_id")
+    .notNull()
+    .references(() => vouchers.id),
+  description: text("description").notNull(),
+  amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+  chartOfAccountId: integer("chart_of_account_id").references(
+    () => chartOfAccounts.id
+  ),
+  invoiceNumber: varchar("invoice_number", { length: 100 }),
+  vatAmount: decimal("vat_amount", { precision: 15, scale: 2 }),
+  amountWithheld: decimal("amount_withheld", { precision: 15, scale: 2 }),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const vouchersRelations = relations(vouchers, ({ one, many }) => ({
   requester: one(users, {
     fields: [vouchers.requestedById],
     references: [users.id],
@@ -102,8 +111,17 @@ export const vouchersRelations = relations(vouchers, ({ one }) => ({
     references: [users.id],
     relationName: "approver",
   }),
+  items: many(voucherItems, { relationName: "voucherItems" }),
+}));
+
+export const voucherItemsRelations = relations(voucherItems, ({ one }) => ({
+  voucher: one(vouchers, {
+    fields: [voucherItems.voucherId],
+    references: [vouchers.id],
+    relationName: "voucherItems",
+  }),
   chartOfAccount: one(chartOfAccounts, {
-    fields: [vouchers.chartOfAccountId],
+    fields: [voucherItems.chartOfAccountId],
     references: [chartOfAccounts.id],
   }),
 }));
@@ -114,11 +132,17 @@ export const replenishmentRequests = pgTable("replenishment_requests", {
   requestDate: timestamp("request_date").notNull().defaultNow(),
   totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).notNull(),
   totalVat: decimal("total_vat", { precision: 15, scale: 2 }).notNull(),
-  totalWithheld: decimal("total_withheld", { precision: 15, scale: 2 }).notNull(),
-  totalNetAmount: decimal("total_net_amount", { precision: 15, scale: 2 }).notNull(),
+  totalWithheld: decimal("total_withheld", {
+    precision: 15,
+    scale: 2,
+  }).notNull(),
+  totalNetAmount: decimal("total_net_amount", {
+    precision: 15,
+    scale: 2,
+  }).notNull(),
   status: varchar("status", { length: 20 }).notNull().default("pending"),
-  requestedById: varchar("requested_by_id").references(() => users.id),
-  approvedById: varchar("approved_by_id").references(() => users.id),
+  requestedById: integer("requested_by_id").references(() => users.id),
+  approvedById: integer("approved_by_id").references(() => users.id),
   voucherIds: integer("voucher_ids").array(),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -131,7 +155,7 @@ export const auditLogs = pgTable("audit_logs", {
   action: varchar("action", { length: 50 }).notNull(), // 'created', 'updated', 'approved', 'rejected', etc.
   oldValue: jsonb("old_value"),
   newValue: jsonb("new_value"),
-  userId: varchar("user_id").references(() => users.id),
+  userId: integer("user_id").references(() => users.id),
   ipAddress: varchar("ip_address", { length: 50 }),
   timestamp: timestamp("timestamp").notNull().defaultNow(),
   description: text("description"),
@@ -147,12 +171,17 @@ export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
 // Budget tracking per chart of account
 export const accountBudgets = pgTable("account_budgets", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  chartOfAccountId: integer("chart_of_account_id").notNull().references(() => chartOfAccounts.id),
+  chartOfAccountId: integer("chart_of_account_id")
+    .notNull()
+    .references(() => chartOfAccounts.id),
   budgetAmount: decimal("budget_amount", { precision: 15, scale: 2 }).notNull(),
   period: varchar("period", { length: 20 }).notNull(), // 'monthly', 'quarterly', 'yearly'
   startDate: timestamp("start_date").notNull(),
   endDate: timestamp("end_date").notNull(),
-  alertThreshold: decimal("alert_threshold", { precision: 5, scale: 2 }).default("80"), // percentage
+  alertThreshold: decimal("alert_threshold", {
+    precision: 5,
+    scale: 2,
+  }).default("80"), // percentage
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -167,69 +196,117 @@ export const accountBudgetsRelations = relations(accountBudgets, ({ one }) => ({
 // Document attachments for vouchers
 export const voucherAttachments = pgTable("voucher_attachments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  voucherId: integer("voucher_id").notNull().references(() => vouchers.id),
+  voucherId: integer("voucher_id")
+    .notNull()
+    .references(() => vouchers.id),
   fileName: varchar("file_name", { length: 255 }).notNull(),
   fileType: varchar("file_type", { length: 100 }).notNull(),
   fileSize: integer("file_size").notNull(),
-  fileData: text("file_data").notNull(), // base64 encoded
-  uploadedById: varchar("uploaded_by_id").references(() => users.id),
+  filePath: varchar("file_path", { length: 500 }).notNull(), // path to file on disk
+  uploadedById: integer("uploaded_by_id").references(() => users.id),
   uploadedAt: timestamp("uploaded_at").notNull().defaultNow(),
 });
 
-export const voucherAttachmentsRelations = relations(voucherAttachments, ({ one }) => ({
-  voucher: one(vouchers, {
-    fields: [voucherAttachments.voucherId],
-    references: [vouchers.id],
-  }),
-  uploadedBy: one(users, {
-    fields: [voucherAttachments.uploadedById],
-    references: [users.id],
-  }),
-}));
+export const voucherAttachmentsRelations = relations(
+  voucherAttachments,
+  ({ one }) => ({
+    voucher: one(vouchers, {
+      fields: [voucherAttachments.voucherId],
+      references: [vouchers.id],
+    }),
+    uploadedBy: one(users, {
+      fields: [voucherAttachments.uploadedById],
+      references: [users.id],
+    }),
+  })
+);
 
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).omit({
   createdAt: true,
-  updatedAt: true,
 });
 
-export const insertChartOfAccountSchema = createInsertSchema(chartOfAccounts).omit({
-  id: true,
-  createdAt: true,
+export const insertChartOfAccountSchema = createInsertSchema(
+  chartOfAccounts
+).pick({
+  code: true,
+  name: true,
+  description: true,
 });
 
-export const insertVoucherSchema = createInsertSchema(vouchers).omit({
-  id: true,
-  voucherNumber: true,
-  createdAt: true,
-  updatedAt: true,
+export const insertVoucherSchema = createInsertSchema(vouchers).pick({
+  date: true,
+  payee: true,
+  totalAmount: true,
+  requestedById: true,
+  approvedById: true,
+  status: true,
+  supportingDocsSubmitted: true,
 });
 
-export const insertPettyCashFundSchema = createInsertSchema(pettyCashFund).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
+export const insertVoucherItemSchema = createInsertSchema(voucherItems).pick({
+  description: true,
+  amount: true,
+  chartOfAccountId: true,
+  invoiceNumber: true,
+  vatAmount: true,
+  amountWithheld: true,
 });
 
-export const insertReplenishmentRequestSchema = createInsertSchema(replenishmentRequests).omit({
-  id: true,
-  createdAt: true,
+export const insertPettyCashFundSchema = createInsertSchema(pettyCashFund).pick(
+  {
+    imprestAmount: true,
+    currentBalance: true,
+    managerId: true,
+    lastReplenishmentDate: true,
+  }
+);
+
+export const insertReplenishmentRequestSchema = createInsertSchema(
+  replenishmentRequests
+).pick({
+  requestDate: true,
+  totalAmount: true,
+  totalVat: true,
+  totalWithheld: true,
+  totalNetAmount: true,
+  status: true,
+  requestedById: true,
+  approvedById: true,
+  voucherIds: true,
 });
 
-export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({
-  id: true,
-  timestamp: true,
+export const insertAuditLogSchema = createInsertSchema(auditLogs).pick({
+  entityType: true,
+  entityId: true,
+  action: true,
+  oldValue: true,
+  newValue: true,
+  userId: true,
+  ipAddress: true,
+  description: true,
 });
 
-export const insertAccountBudgetSchema = createInsertSchema(accountBudgets).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
+export const insertAccountBudgetSchema = createInsertSchema(
+  accountBudgets
+).pick({
+  chartOfAccountId: true,
+  budgetAmount: true,
+  period: true,
+  startDate: true,
+  endDate: true,
+  alertThreshold: true,
 });
 
-export const insertVoucherAttachmentSchema = createInsertSchema(voucherAttachments).omit({
-  id: true,
-  uploadedAt: true,
+export const insertVoucherAttachmentSchema = createInsertSchema(
+  voucherAttachments
+).pick({
+  voucherId: true,
+  fileName: true,
+  fileType: true,
+  fileSize: true,
+  filePath: true,
+  uploadedById: true,
 });
 
 // Types
@@ -240,22 +317,28 @@ export type ChartOfAccount = typeof chartOfAccounts.$inferSelect;
 export type InsertChartOfAccount = z.infer<typeof insertChartOfAccountSchema>;
 export type Voucher = typeof vouchers.$inferSelect;
 export type InsertVoucher = z.infer<typeof insertVoucherSchema>;
+export type VoucherItem = typeof voucherItems.$inferSelect;
+export type InsertVoucherItem = z.infer<typeof insertVoucherItemSchema>;
 export type PettyCashFund = typeof pettyCashFund.$inferSelect;
 export type InsertPettyCashFund = z.infer<typeof insertPettyCashFundSchema>;
 export type ReplenishmentRequest = typeof replenishmentRequests.$inferSelect;
-export type InsertReplenishmentRequest = z.infer<typeof insertReplenishmentRequestSchema>;
+export type InsertReplenishmentRequest = z.infer<
+  typeof insertReplenishmentRequestSchema
+>;
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
 export type AccountBudget = typeof accountBudgets.$inferSelect;
 export type InsertAccountBudget = z.infer<typeof insertAccountBudgetSchema>;
 export type VoucherAttachment = typeof voucherAttachments.$inferSelect;
-export type InsertVoucherAttachment = z.infer<typeof insertVoucherAttachmentSchema>;
+export type InsertVoucherAttachment = z.infer<
+  typeof insertVoucherAttachmentSchema
+>;
 
 // Extended types with relations
 export type VoucherWithRelations = Voucher & {
   requester?: User | null;
   approver?: User | null;
-  chartOfAccount?: ChartOfAccount | null;
+  items?: (VoucherItem & { chartOfAccount?: ChartOfAccount | null })[];
 };
 
 export type AuditLogWithUser = AuditLog & {

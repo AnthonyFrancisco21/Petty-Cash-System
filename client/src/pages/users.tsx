@@ -40,24 +40,24 @@ import { format } from "date-fns";
 
 function getRoleLabel(role: string): string {
   switch (role) {
-    case "cash_manager":
-      return "Cash Manager";
+    case "preparer":
+      return "Preparer";
     case "approver":
       return "Approver";
     case "admin":
       return "Admin";
     default:
-      return "Requester";
+      return "Unknown";
   }
 }
 
 function getRoleVariant(role: string): "default" | "secondary" | "outline" {
   switch (role) {
-    case "cash_manager":
+    case "preparer":
     case "admin":
       return "default";
     case "approver":
-      return "secondary";
+      return "default";
     default:
       return "outline";
   }
@@ -74,7 +74,7 @@ export default function UsersPage() {
   });
 
   const updateRole = useMutation({
-    mutationFn: async ({ userId, role }: { userId: string; role: string }) => {
+    mutationFn: async ({ userId, role }: { userId: number; role: string }) => {
       return await apiRequest("PATCH", `/api/users/${userId}/role`, { role });
     },
     onSuccess: () => {
@@ -93,7 +93,7 @@ export default function UsersPage() {
           variant: "destructive",
         });
         setTimeout(() => {
-          window.location.href = "/api/login";
+          window.location.href = "/auth";
         }, 500);
         return;
       }
@@ -107,8 +107,10 @@ export default function UsersPage() {
 
   const filteredUsers = users?.filter(
     (u) =>
-      `${u.firstName} ${u.lastName}`.toLowerCase().includes(search.toLowerCase()) ||
-      u.email?.toLowerCase().includes(search.toLowerCase())
+      `${u.firstName} ${u.lastName}`
+        .toLowerCase()
+        .includes(search.toLowerCase()) ||
+      u.username?.toLowerCase().includes(search.toLowerCase())
   );
 
   const handleEditRole = (user: User) => {
@@ -182,7 +184,6 @@ export default function UsersPage() {
                         <div className="flex items-center gap-3">
                           <Avatar className="h-9 w-9">
                             <AvatarImage
-                              src={user.profileImageUrl || undefined}
                               alt={`${user.firstName} ${user.lastName}`}
                               className="object-cover"
                             />
@@ -195,11 +196,11 @@ export default function UsersPage() {
                             <p className="font-medium">
                               {user.firstName} {user.lastName}
                             </p>
+                            <p className="text-sm text-muted-foreground">
+                              {user.username}
+                            </p>
                           </div>
                         </div>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {user.email || "-"}
                       </TableCell>
                       <TableCell>
                         <Badge variant={getRoleVariant(user.role)}>
@@ -228,16 +229,14 @@ export default function UsersPage() {
                             <DialogHeader>
                               <DialogTitle>Edit User Role</DialogTitle>
                               <DialogDescription>
-                                Change the role for {user.firstName} {user.lastName}
+                                Change the role for {user.firstName}{" "}
+                                {user.lastName}
                               </DialogDescription>
                             </DialogHeader>
                             <div className="py-4">
                               <div className="flex items-center gap-4 mb-4">
                                 <Avatar className="h-12 w-12">
-                                  <AvatarImage
-                                    src={user.profileImageUrl || undefined}
-                                    className="object-cover"
-                                  />
+                                  <AvatarImage className="object-cover" />
                                   <AvatarFallback>
                                     {user.firstName?.[0]}
                                     {user.lastName?.[0]}
@@ -248,20 +247,26 @@ export default function UsersPage() {
                                     {user.firstName} {user.lastName}
                                   </p>
                                   <p className="text-sm text-muted-foreground">
-                                    {user.email}
+                                    {user.username}
                                   </p>
                                 </div>
                               </div>
                               <div className="space-y-2">
                                 <Label>Role</Label>
-                                <Select value={newRole} onValueChange={setNewRole}>
+                                <Select
+                                  value={newRole}
+                                  onValueChange={setNewRole}
+                                >
                                   <SelectTrigger data-testid="select-new-role">
                                     <SelectValue placeholder="Select role" />
                                   </SelectTrigger>
                                   <SelectContent>
-                                    <SelectItem value="requester">Requester</SelectItem>
-                                    <SelectItem value="approver">Approver</SelectItem>
-                                    <SelectItem value="cash_manager">Cash Manager</SelectItem>
+                                    <SelectItem value="preparer">
+                                      Preparer
+                                    </SelectItem>
+                                    <SelectItem value="approver">
+                                      Approver
+                                    </SelectItem>
                                     <SelectItem value="admin">Admin</SelectItem>
                                   </SelectContent>
                                 </Select>

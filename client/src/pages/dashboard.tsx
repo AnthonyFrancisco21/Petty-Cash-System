@@ -26,7 +26,9 @@ function formatCurrency(amount: string | number): string {
   });
 }
 
-function getStatusVariant(status: string): "default" | "secondary" | "outline" | "destructive" {
+function getStatusVariant(
+  status: string
+): "default" | "secondary" | "outline" | "destructive" {
   switch (status) {
     case "approved":
       return "default";
@@ -64,7 +66,10 @@ function StatCard({
         {isLoading ? (
           <Skeleton className="h-8 w-32" />
         ) : (
-          <div className="font-mono text-2xl font-semibold" data-testid={`text-stat-${title.toLowerCase().replace(/\s/g, '-')}`}>
+          <div
+            className="font-mono text-2xl font-semibold"
+            data-testid={`text-stat-${title.toLowerCase().replace(/\s/g, "-")}`}
+          >
             {value}
           </div>
         )}
@@ -78,7 +83,7 @@ function StatCard({
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const isCashManager = user?.role === "cash_manager" || user?.role === "admin";
+  const isCashManager = user?.role === "preparer" || user?.role === "admin";
 
   const { data: fund, isLoading: fundLoading } = useQuery<PettyCashFund>({
     queryKey: ["/api/fund"],
@@ -92,12 +97,15 @@ export default function Dashboard() {
     queryKey: ["/api/vouchers/stats"],
   });
 
-  const { data: recentVouchers, isLoading: vouchersLoading } = useQuery<VoucherWithRelations[]>({
+  const { data: recentVouchers, isLoading: vouchersLoading } = useQuery<
+    VoucherWithRelations[]
+  >({
     queryKey: ["/api/vouchers", { limit: 5 }],
   });
 
   const depletionPercentage = fund
-    ? (1 - parseFloat(fund.currentBalance) / parseFloat(fund.imprestAmount)) * 100
+    ? (1 - parseFloat(fund.currentBalance) / parseFloat(fund.imprestAmount)) *
+      100
     : 0;
 
   return (
@@ -165,25 +173,31 @@ export default function Dashboard() {
       {fund && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg font-medium">Fund Depletion</CardTitle>
+            <CardTitle className="text-lg font-medium">
+              Fund Depletion
+            </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Progress
-              value={100 - depletionPercentage}
-              className="h-3"
-            />
+            <Progress value={100 - depletionPercentage} className="h-3" />
             <div className="flex items-center justify-between text-sm">
               <div className="space-y-1">
                 <p className="text-muted-foreground">Remaining</p>
-                <p className="font-mono font-semibold" data-testid="text-remaining-balance">
+                <p
+                  className="font-mono font-semibold"
+                  data-testid="text-remaining-balance"
+                >
                   {formatCurrency(fund.currentBalance)}
                 </p>
               </div>
               <div className="text-right space-y-1">
                 <p className="text-muted-foreground">Disbursed</p>
-                <p className="font-mono font-semibold" data-testid="text-disbursed-amount">
+                <p
+                  className="font-mono font-semibold"
+                  data-testid="text-disbursed-amount"
+                >
                   {formatCurrency(
-                    parseFloat(fund.imprestAmount) - parseFloat(fund.currentBalance)
+                    parseFloat(fund.imprestAmount) -
+                      parseFloat(fund.currentBalance)
                   )}
                 </p>
               </div>
@@ -192,7 +206,8 @@ export default function Dashboard() {
               <div className="flex items-center gap-2 p-3 rounded-md bg-destructive/10 text-destructive">
                 <TrendingDown className="h-4 w-4" />
                 <span className="text-sm font-medium">
-                  Fund is {depletionPercentage.toFixed(0)}% depleted. Consider requesting replenishment.
+                  Fund is {depletionPercentage.toFixed(0)}% depleted. Consider
+                  requesting replenishment.
                 </span>
               </div>
             )}
@@ -202,9 +217,15 @@ export default function Dashboard() {
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">
-          <CardTitle className="text-lg font-medium">Recent Disbursements</CardTitle>
+          <CardTitle className="text-lg font-medium">
+            Recent Disbursements
+          </CardTitle>
           <Link href="/vouchers">
-            <Button variant="ghost" size="sm" data-testid="link-view-all-vouchers">
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="link-view-all-vouchers"
+            >
               View All
             </Button>
           </Link>
@@ -236,8 +257,10 @@ export default function Dashboard() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium truncate">{voucher.payee}</span>
-                      <Badge variant={getStatusVariant(voucher.status)} size="sm">
+                      <span className="font-medium truncate">
+                        {voucher.payee}
+                      </span>
+                      <Badge variant={getStatusVariant(voucher.status)}>
                         {voucher.status === "approved" && (
                           <CheckCircle className="h-3 w-3 mr-1" />
                         )}
@@ -248,12 +271,13 @@ export default function Dashboard() {
                       </Badge>
                     </div>
                     <p className="text-sm text-muted-foreground truncate">
-                      {voucher.voucherNumber} - {voucher.description}
+                      {voucher.voucherNumber} -{" "}
+                      {voucher.items?.[0]?.description || ""}
                     </p>
                   </div>
                   <div className="text-right">
                     <p className="font-mono font-semibold">
-                      {formatCurrency(voucher.amount)}
+                      {formatCurrency(voucher.totalAmount)}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       {format(new Date(voucher.date), "MMM d, yyyy")}
@@ -267,7 +291,11 @@ export default function Dashboard() {
               <FileText className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" />
               <p className="text-muted-foreground">No disbursements yet</p>
               <Link href="/vouchers/new">
-                <Button variant="outline" className="mt-4" data-testid="button-create-first-voucher">
+                <Button
+                  variant="outline"
+                  className="mt-4"
+                  data-testid="button-create-first-voucher"
+                >
                   Create First Voucher
                 </Button>
               </Link>

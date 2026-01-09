@@ -1,6 +1,7 @@
 import {
   users,
   vouchers,
+  voucherItems,
   chartOfAccounts,
   pettyCashFund,
   replenishmentRequests,
@@ -11,6 +12,8 @@ import {
   type UpsertUser,
   type Voucher,
   type InsertVoucher,
+  type VoucherItem,
+  type InsertVoucherItem,
   type ChartOfAccount,
   type InsertChartOfAccount,
   type PettyCashFund,
@@ -29,32 +32,53 @@ import { eq, desc, sql, and, inArray, gte, lte, between } from "drizzle-orm";
 
 export interface IStorage {
   // User operations
-  getUser(id: string): Promise<User | undefined>;
+  getUser(id: number | string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: any): Promise<User>;
   upsertUser(user: UpsertUser): Promise<User>;
   getAllUsers(): Promise<User[]>;
-  updateUserRole(id: string, role: string): Promise<User | undefined>;
+  updateUserRole(id: number, role: string): Promise<User | undefined>;
 
   // Voucher operations
   getVouchers(status?: string): Promise<Voucher[]>;
   getVoucherById(id: number): Promise<Voucher | undefined>;
-  createVoucher(voucher: InsertVoucher & { voucherNumber: string }): Promise<Voucher>;
-  updateVoucherStatus(id: number, status: string, approvedById?: string): Promise<Voucher | undefined>;
-  getVoucherStats(): Promise<{ totalDisbursed: string; pendingCount: number; approvedCount: number }>;
+  createVoucher(
+    voucher: InsertVoucher & { voucherNumber: string }
+  ): Promise<Voucher>;
+  updateVoucherStatus(
+    id: number,
+    status: string,
+    approvedById?: number
+  ): Promise<Voucher | undefined>;
+  getVoucherStats(): Promise<{
+    totalDisbursed: string;
+    pendingCount: number;
+    approvedCount: number;
+  }>;
   getVouchersWithRelations(status?: string): Promise<any[]>;
 
   // Chart of Accounts operations
   getChartOfAccounts(): Promise<ChartOfAccount[]>;
   getChartOfAccountById(id: number): Promise<ChartOfAccount | undefined>;
   createChartOfAccount(coa: InsertChartOfAccount): Promise<ChartOfAccount>;
+  updateChartOfAccount(
+    id: number,
+    data: Partial<InsertChartOfAccount>
+  ): Promise<ChartOfAccount | undefined>;
   deleteChartOfAccount(id: number): Promise<void>;
 
   // Petty Cash Fund operations
   getFund(): Promise<PettyCashFund | undefined>;
   createFund(fund: InsertPettyCashFund): Promise<PettyCashFund>;
-  updateFund(id: number, data: Partial<InsertPettyCashFund>): Promise<PettyCashFund | undefined>;
+  updateFund(
+    id: number,
+    data: Partial<InsertPettyCashFund>
+  ): Promise<PettyCashFund | undefined>;
 
   // Replenishment operations
-  createReplenishmentRequest(request: InsertReplenishmentRequest): Promise<ReplenishmentRequest>;
+  createReplenishmentRequest(
+    request: InsertReplenishmentRequest
+  ): Promise<ReplenishmentRequest>;
   getReplenishmentRequests(): Promise<ReplenishmentRequest[]>;
 
   // Audit log operations
@@ -66,22 +90,46 @@ export interface IStorage {
   createAccountBudget(budget: InsertAccountBudget): Promise<AccountBudget>;
   getAccountBudgets(): Promise<any[]>;
   getAccountBudgetById(id: number): Promise<AccountBudget | undefined>;
-  updateAccountBudget(id: number, data: Partial<InsertAccountBudget>): Promise<AccountBudget | undefined>;
+  updateAccountBudget(
+    id: number,
+    data: Partial<InsertAccountBudget>
+  ): Promise<AccountBudget | undefined>;
   deleteAccountBudget(id: number): Promise<void>;
-  getBudgetSpending(chartOfAccountId: number, startDate: Date, endDate: Date): Promise<string>;
+  getBudgetSpending(
+    chartOfAccountId: number,
+    startDate: Date,
+    endDate: Date
+  ): Promise<string>;
 
   // Voucher attachment operations
-  createVoucherAttachment(attachment: InsertVoucherAttachment): Promise<VoucherAttachment>;
+  createVoucherAttachment(
+    attachment: InsertVoucherAttachment
+  ): Promise<VoucherAttachment>;
   getVoucherAttachments(voucherId: number): Promise<VoucherAttachment[]>;
   deleteVoucherAttachment(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
-  // User operations
-  async getUser(id: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.id, id));
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.username, username));
     return user;
   }
+
+  async createUser(insertUser: any): Promise<User> {
+    const [user] = await db.insert(users).values(insertUser).returning();
+    return user;
+  }
+
+  async getUser(id: number | string): Promise<User | undefined> {
+    const parsedId = typeof id === "string" ? parseInt(id) : id;
+    const [user] = await db.select().from(users).where(eq(users.id, parsedId));
+    return user;
+  }
+
+  // User operations
 
   async upsertUser(userData: UpsertUser): Promise<User> {
     const [user] = await db
@@ -90,11 +138,9 @@ export class DatabaseStorage implements IStorage {
       .onConflictDoUpdate({
         target: users.id,
         set: {
-          email: userData.email,
           firstName: userData.firstName,
           lastName: userData.lastName,
-          profileImageUrl: userData.profileImageUrl,
-          updatedAt: new Date(),
+          role: userData.role,
         },
       })
       .returning();
@@ -105,87 +151,180 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(users).orderBy(users.firstName);
   }
 
-  async updateUserRole(id: string, role: string): Promise<User | undefined> {
+  async updateUserRole(id: number, role: string): Promise<User | undefined> {
     const [user] = await db
       .update(users)
-      .set({ role, updatedAt: new Date() })
+      .set({ role })
       .where(eq(users.id, id))
       .returning();
     return user;
   }
 
   // Voucher operations
-  async getVouchers(status?: string): Promise<Voucher[]> {
+  async getVouchers(
+    status?: string,
+    limit?: number,
+    offset?: number
+  ): Promise<Voucher[]> {
+    const builder = db.select().from(vouchers);
     if (status) {
-      return await db
-        .select()
-        .from(vouchers)
-        .where(eq(vouchers.status, status))
-        .orderBy(desc(vouchers.date));
+      builder.where(eq(vouchers.status, status));
     }
-    return await db.select().from(vouchers).orderBy(desc(vouchers.date));
+    builder.orderBy(desc(vouchers.date));
+    if (typeof limit === "number") {
+      builder.limit(limit);
+    }
+    if (typeof offset === "number") {
+      builder.offset(offset);
+    }
+    return await builder;
   }
 
   async getVoucherById(id: number): Promise<Voucher | undefined> {
-    const [voucher] = await db.select().from(vouchers).where(eq(vouchers.id, id));
+    const [voucher] = await db
+      .select()
+      .from(vouchers)
+      .where(eq(vouchers.id, id));
     return voucher;
   }
 
-  async createVoucher(voucher: InsertVoucher & { voucherNumber: string }): Promise<Voucher> {
-    const [created] = await db.insert(vouchers).values(voucher).returning();
-
-    // Update fund balance
-    const fund = await this.getFund();
-    if (fund) {
-      const newBalance = parseFloat(fund.currentBalance) - parseFloat(voucher.amount);
-      await db
-        .update(pettyCashFund)
-        .set({ currentBalance: newBalance.toString(), updatedAt: new Date() })
-        .where(eq(pettyCashFund.id, fund.id));
+  async createVoucher(
+    voucher: InsertVoucher & {
+      voucherNumber: string;
+      items: InsertVoucherItem[];
     }
+  ): Promise<Voucher> {
+    // Start transaction
+    const result = await db.transaction(async (tx) => {
+      // Create voucher header
+      const [created] = await tx
+        .insert(vouchers)
+        .values({
+          voucherNumber: voucher.voucherNumber,
+          date: voucher.date,
+          payee: voucher.payee,
+          totalAmount: voucher.totalAmount,
+          requestedById: voucher.requestedById,
+          approvedById: voucher.approvedById,
+          status: voucher.status,
+          supportingDocsSubmitted: voucher.supportingDocsSubmitted,
+        })
+        .returning();
 
-    return created;
+      // Create voucher items
+      if (voucher.items && voucher.items.length > 0) {
+        await tx.insert(voucherItems).values(
+          voucher.items.map((item) => ({
+            voucherId: created.id,
+            description: item.description,
+            amount: item.amount,
+            chartOfAccountId: item.chartOfAccountId,
+            invoiceNumber: item.invoiceNumber,
+            vatAmount: item.vatAmount,
+            amountWithheld: item.amountWithheld,
+          }))
+        );
+      }
+
+      // Update fund balance (only if fund exists)
+      const fund = await tx.select().from(pettyCashFund).limit(1);
+      if (fund.length > 0) {
+        const currentBalance = parseFloat(fund[0].currentBalance);
+        const voucherAmount = parseFloat(voucher.totalAmount);
+
+        // Check if fund has sufficient balance
+        if (currentBalance < voucherAmount) {
+          throw new Error(
+            `Insufficient fund balance. Available: ${currentBalance}, Required: ${voucherAmount}`
+          );
+        }
+
+        const newBalance = currentBalance - voucherAmount;
+        await tx
+          .update(pettyCashFund)
+          .set({ currentBalance: newBalance.toString(), updatedAt: new Date() })
+          .where(eq(pettyCashFund.id, fund[0].id));
+      }
+      // If no fund exists, allow voucher creation but log a warning
+      // This allows the system to work even without fund configuration
+
+      return created;
+    });
+
+    return result;
   }
 
-  async updateVoucherStatus(id: number, status: string, approvedById?: string): Promise<Voucher | undefined> {
-    const updateData: any = { status, updatedAt: new Date() };
+  async updateVoucherStatus(
+    id: number,
+    status: string,
+    approvedById?: number
+  ): Promise<Voucher | undefined> {
+    const updateData: any = { status };
     if (approvedById) {
       updateData.approvedById = approvedById;
     }
     const [voucher] = await db
       .update(vouchers)
-      .set(updateData)
+      .set(updateData as any)
       .where(eq(vouchers.id, id))
       .returning();
     return voucher;
   }
 
-  async getVoucherStats(): Promise<{ totalDisbursed: string; pendingCount: number; approvedCount: number }> {
+  async getVoucherStats(): Promise<{
+    totalDisbursed: string;
+    pendingCount: number;
+    approvedCount: number;
+  }> {
     const result = await db
       .select({
-        totalDisbursed: sql<string>`COALESCE(SUM(CASE WHEN ${vouchers.status} != 'rejected' THEN ${vouchers.amount}::numeric ELSE 0 END), 0)::text`,
+        totalDisbursed: sql<string>`COALESCE(SUM(CASE WHEN ${vouchers.status} != 'rejected' THEN ${vouchers.totalAmount}::numeric ELSE 0 END), 0)::text`,
         pendingCount: sql<number>`COUNT(CASE WHEN ${vouchers.status} = 'pending' THEN 1 END)::int`,
         approvedCount: sql<number>`COUNT(CASE WHEN ${vouchers.status} = 'approved' THEN 1 END)::int`,
       })
       .from(vouchers);
 
-    return result[0] || { totalDisbursed: "0", pendingCount: 0, approvedCount: 0 };
+    return (
+      result[0] || { totalDisbursed: "0", pendingCount: 0, approvedCount: 0 }
+    );
   }
 
-  async getVouchersWithRelations(status?: string): Promise<any[]> {
-    const voucherList = await this.getVouchers(status);
+  async getVouchersWithRelations(
+    status?: string,
+    limit?: number,
+    offset?: number
+  ): Promise<any[]> {
+    const voucherList = await this.getVouchers(status, limit, offset);
     const result = [];
 
     for (const v of voucherList) {
-      const requester = v.requestedById ? await this.getUser(v.requestedById) : null;
-      const approver = v.approvedById ? await this.getUser(v.approvedById) : null;
-      const coa = v.chartOfAccountId ? await this.getChartOfAccountById(v.chartOfAccountId) : null;
+      const requester = v.requestedById
+        ? await this.getUser(v.requestedById)
+        : null;
+      const approver = v.approvedById
+        ? await this.getUser(v.approvedById)
+        : null;
+
+      // Get voucher items with their chart of accounts
+      const items = await db
+        .select()
+        .from(voucherItems)
+        .leftJoin(
+          chartOfAccounts,
+          eq(voucherItems.chartOfAccountId, chartOfAccounts.id)
+        )
+        .where(eq(voucherItems.voucherId, v.id));
+
+      const voucherItemsWithCoa = items.map((item) => ({
+        ...item.voucher_items,
+        chartOfAccount: item.chart_of_accounts,
+      }));
 
       result.push({
         ...v,
         requester,
         approver,
-        chartOfAccount: coa,
+        items: voucherItemsWithCoa,
       });
     }
 
@@ -194,17 +333,40 @@ export class DatabaseStorage implements IStorage {
 
   // Chart of Accounts operations
   async getChartOfAccounts(): Promise<ChartOfAccount[]> {
-    return await db.select().from(chartOfAccounts).orderBy(chartOfAccounts.code);
+    return await db
+      .select()
+      .from(chartOfAccounts)
+      .orderBy(chartOfAccounts.code);
   }
 
   async getChartOfAccountById(id: number): Promise<ChartOfAccount | undefined> {
-    const [coa] = await db.select().from(chartOfAccounts).where(eq(chartOfAccounts.id, id));
+    const [coa] = await db
+      .select()
+      .from(chartOfAccounts)
+      .where(eq(chartOfAccounts.id, id));
     return coa;
   }
 
-  async createChartOfAccount(coa: InsertChartOfAccount): Promise<ChartOfAccount> {
-    const [created] = await db.insert(chartOfAccounts).values(coa).returning();
+  async createChartOfAccount(
+    coa: InsertChartOfAccount
+  ): Promise<ChartOfAccount> {
+    const [created] = await db
+      .insert(chartOfAccounts)
+      .values(coa as any)
+      .returning();
     return created;
+  }
+
+  async updateChartOfAccount(
+    id: number,
+    data: Partial<InsertChartOfAccount>
+  ): Promise<ChartOfAccount | undefined> {
+    const [updated] = await db
+      .update(chartOfAccounts)
+      .set(data as any)
+      .where(eq(chartOfAccounts.id, id))
+      .returning();
+    return updated;
   }
 
   async deleteChartOfAccount(id: number): Promise<void> {
@@ -218,29 +380,40 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createFund(fund: InsertPettyCashFund): Promise<PettyCashFund> {
-    const [created] = await db.insert(pettyCashFund).values(fund).returning();
+    const [created] = await db
+      .insert(pettyCashFund)
+      .values(fund as any)
+      .returning();
     return created;
   }
 
-  async updateFund(id: number, data: Partial<InsertPettyCashFund>): Promise<PettyCashFund | undefined> {
+  async updateFund(
+    id: number,
+    data: Partial<InsertPettyCashFund>
+  ): Promise<PettyCashFund | undefined> {
     const [updated] = await db
       .update(pettyCashFund)
-      .set({ ...data, updatedAt: new Date() })
+      .set(data as any)
       .where(eq(pettyCashFund.id, id))
       .returning();
     return updated;
   }
 
   // Replenishment operations
-  async createReplenishmentRequest(request: InsertReplenishmentRequest): Promise<ReplenishmentRequest> {
-    const [created] = await db.insert(replenishmentRequests).values(request).returning();
+  async createReplenishmentRequest(
+    request: InsertReplenishmentRequest
+  ): Promise<ReplenishmentRequest> {
+    const [created] = await db
+      .insert(replenishmentRequests)
+      .values(request as any)
+      .returning();
 
     // Mark vouchers as replenished
-    if (request.voucherIds && request.voucherIds.length > 0) {
+    if ((request as any).voucherIds && (request as any).voucherIds.length > 0) {
       await db
         .update(vouchers)
-        .set({ status: "replenished", updatedAt: new Date() })
-        .where(inArray(vouchers.id, request.voucherIds));
+        .set({ status: "replenished" })
+        .where(inArray(vouchers.id, (request as any).voucherIds));
 
       // Restore fund balance
       const fund = await this.getFund();
@@ -250,7 +423,6 @@ export class DatabaseStorage implements IStorage {
           .set({
             currentBalance: fund.imprestAmount,
             lastReplenishmentDate: new Date(),
-            updatedAt: new Date(),
           })
           .where(eq(pettyCashFund.id, fund.id));
       }
@@ -268,20 +440,28 @@ export class DatabaseStorage implements IStorage {
 
   // Audit log operations
   async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
-    const [created] = await db.insert(auditLogs).values(log).returning();
+    const [created] = await db
+      .insert(auditLogs)
+      .values(log as any)
+      .returning();
     return created;
   }
 
   async getAuditLogs(entityType?: string, entityId?: string): Promise<any[]> {
     let query = db.select().from(auditLogs);
-    
+
     if (entityType && entityId) {
       const logs = await db
         .select()
         .from(auditLogs)
-        .where(and(eq(auditLogs.entityType, entityType), eq(auditLogs.entityId, entityId)))
+        .where(
+          and(
+            eq(auditLogs.entityType, entityType),
+            eq(auditLogs.entityId, entityId)
+          )
+        )
         .orderBy(desc(auditLogs.timestamp));
-      
+
       const result = [];
       for (const log of logs) {
         const user = log.userId ? await this.getUser(log.userId) : null;
@@ -294,7 +474,7 @@ export class DatabaseStorage implements IStorage {
         .from(auditLogs)
         .where(eq(auditLogs.entityType, entityType))
         .orderBy(desc(auditLogs.timestamp));
-      
+
       const result = [];
       for (const log of logs) {
         const user = log.userId ? await this.getUser(log.userId) : null;
@@ -302,8 +482,11 @@ export class DatabaseStorage implements IStorage {
       }
       return result;
     }
-    
-    const logs = await db.select().from(auditLogs).orderBy(desc(auditLogs.timestamp));
+
+    const logs = await db
+      .select()
+      .from(auditLogs)
+      .orderBy(desc(auditLogs.timestamp));
     const result = [];
     for (const log of logs) {
       const user = log.userId ? await this.getUser(log.userId) : null;
@@ -318,7 +501,7 @@ export class DatabaseStorage implements IStorage {
       .from(auditLogs)
       .orderBy(desc(auditLogs.timestamp))
       .limit(limit);
-    
+
     const result = [];
     for (const log of logs) {
       const user = log.userId ? await this.getUser(log.userId) : null;
@@ -328,8 +511,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Budget tracking operations
-  async createAccountBudget(budget: InsertAccountBudget): Promise<AccountBudget> {
-    const [created] = await db.insert(accountBudgets).values(budget).returning();
+  async createAccountBudget(
+    budget: InsertAccountBudget
+  ): Promise<AccountBudget> {
+    const [created] = await db
+      .insert(accountBudgets)
+      .values(budget as any)
+      .returning();
     return created;
   }
 
@@ -338,7 +526,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(accountBudgets)
       .orderBy(accountBudgets.chartOfAccountId);
-    
+
     const result = [];
     for (const budget of budgets) {
       const coa = await this.getChartOfAccountById(budget.chartOfAccountId);
@@ -351,23 +539,33 @@ export class DatabaseStorage implements IStorage {
         ...budget,
         chartOfAccount: coa,
         currentSpending: spending,
-        percentageUsed: parseFloat(budget.budgetAmount) > 0 
-          ? (parseFloat(spending) / parseFloat(budget.budgetAmount) * 100).toFixed(2)
-          : "0",
+        percentageUsed:
+          parseFloat(budget.budgetAmount) > 0
+            ? (
+                (parseFloat(spending) / parseFloat(budget.budgetAmount)) *
+                100
+              ).toFixed(2)
+            : "0",
       });
     }
     return result;
   }
 
   async getAccountBudgetById(id: number): Promise<AccountBudget | undefined> {
-    const [budget] = await db.select().from(accountBudgets).where(eq(accountBudgets.id, id));
+    const [budget] = await db
+      .select()
+      .from(accountBudgets)
+      .where(eq(accountBudgets.id, id));
     return budget;
   }
 
-  async updateAccountBudget(id: number, data: Partial<InsertAccountBudget>): Promise<AccountBudget | undefined> {
+  async updateAccountBudget(
+    id: number,
+    data: Partial<InsertAccountBudget>
+  ): Promise<AccountBudget | undefined> {
     const [updated] = await db
       .update(accountBudgets)
-      .set({ ...data, updatedAt: new Date() })
+      .set(data as any)
       .where(eq(accountBudgets.id, id))
       .returning();
     return updated;
@@ -377,15 +575,20 @@ export class DatabaseStorage implements IStorage {
     await db.delete(accountBudgets).where(eq(accountBudgets.id, id));
   }
 
-  async getBudgetSpending(chartOfAccountId: number, startDate: Date, endDate: Date): Promise<string> {
+  async getBudgetSpending(
+    chartOfAccountId: number,
+    startDate: Date,
+    endDate: Date
+  ): Promise<string> {
     const result = await db
       .select({
-        total: sql<string>`COALESCE(SUM(${vouchers.amount}::numeric), 0)::text`,
+        total: sql<string>`COALESCE(SUM(${voucherItems.amount}::numeric), 0)::text`,
       })
-      .from(vouchers)
+      .from(voucherItems)
+      .innerJoin(vouchers, eq(voucherItems.voucherId, vouchers.id))
       .where(
         and(
-          eq(vouchers.chartOfAccountId, chartOfAccountId),
+          eq(voucherItems.chartOfAccountId, chartOfAccountId),
           gte(vouchers.date, startDate),
           lte(vouchers.date, endDate),
           sql`${vouchers.status} != 'rejected'`
@@ -395,8 +598,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Voucher attachment operations
-  async createVoucherAttachment(attachment: InsertVoucherAttachment): Promise<VoucherAttachment> {
-    const [created] = await db.insert(voucherAttachments).values(attachment).returning();
+  async createVoucherAttachment(
+    attachment: InsertVoucherAttachment
+  ): Promise<VoucherAttachment> {
+    const [created] = await db
+      .insert(voucherAttachments)
+      .values(attachment as any)
+      .returning();
     return created;
   }
 
@@ -408,7 +616,36 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(voucherAttachments.uploadedAt));
   }
 
+  async getVoucherAttachmentById(
+    id: number
+  ): Promise<VoucherAttachment | undefined> {
+    const [attachment] = await db
+      .select()
+      .from(voucherAttachments)
+      .where(eq(voucherAttachments.id, id));
+    return attachment;
+  }
+
   async deleteVoucherAttachment(id: number): Promise<void> {
+    // Get attachment info first to delete the file
+    const [attachment] = await db
+      .select()
+      .from(voucherAttachments)
+      .where(eq(voucherAttachments.id, id));
+
+    if (attachment) {
+      // Delete file from disk if it exists
+      try {
+        const fs = require("fs").promises;
+        const path = require("path");
+        const fullPath = path.resolve(attachment.filePath);
+        await fs.unlink(fullPath);
+      } catch (error) {
+        // File might not exist, continue with database deletion
+        console.warn(`Could not delete file for attachment ${id}:`, error);
+      }
+    }
+
     await db.delete(voucherAttachments).where(eq(voucherAttachments.id, id));
   }
 }

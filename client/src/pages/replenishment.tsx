@@ -52,23 +52,40 @@ export default function Replenishment() {
     queryKey: ["/api/fund"],
   });
 
-  const { data: vouchers, isLoading: vouchersLoading } = useQuery<VoucherWithRelations[]>({
+  const { data: vouchers, isLoading: vouchersLoading } = useQuery<
+    VoucherWithRelations[]
+  >({
     queryKey: ["/api/vouchers", { status: "approved" }],
   });
 
-  const approvedVouchers = vouchers?.filter((v) => v.status === "approved") || [];
+  const approvedVouchers =
+    vouchers?.filter((v) => v.status === "approved") || [];
 
   const selectedVoucherData = approvedVouchers.filter((v) =>
     selectedVouchers.includes(v.id)
   );
 
   const totals = selectedVoucherData.reduce(
-    (acc, v) => ({
-      amount: acc.amount + parseFloat(v.amount),
-      vat: acc.vat + parseFloat(v.vatAmount || "0"),
-      withheld: acc.withheld + parseFloat(v.amountWithheld || "0"),
-      netAmount: acc.netAmount + parseFloat(v.amountNetOfVat || v.amount),
-    }),
+    (acc, v) => {
+      const voucherAmount =
+        v.items?.reduce((sum, item) => sum + parseFloat(item.amount), 0) || 0;
+      const voucherVat =
+        v.items?.reduce(
+          (sum, item) => sum + parseFloat(item.vatAmount || "0"),
+          0
+        ) || 0;
+      const voucherWithheld =
+        v.items?.reduce(
+          (sum, item) => sum + parseFloat(item.amountWithheld || "0"),
+          0
+        ) || 0;
+      return {
+        amount: acc.amount + voucherAmount,
+        vat: acc.vat + voucherVat,
+        withheld: acc.withheld + voucherWithheld,
+        netAmount: acc.netAmount + voucherAmount, // For now, net amount is total amount
+      };
+    },
     { amount: 0, vat: 0, withheld: 0, netAmount: 0 }
   );
 
@@ -89,7 +106,9 @@ export default function Replenishment() {
       });
       queryClient.invalidateQueries({ queryKey: ["/api/vouchers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/fund"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/replenishment-requests"] });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/replenishment-requests"],
+      });
       setSelectedVouchers([]);
     },
     onError: (error) => {
@@ -145,17 +164,31 @@ export default function Replenishment() {
       v.voucherNumber,
       format(new Date(v.date), "yyyy-MM-dd"),
       v.payee,
-      v.description,
-      v.amount,
-      v.amountNetOfVat || "",
-      v.vatAmount || "",
-      v.amountWithheld || "",
-      v.chartOfAccount?.code || "",
+      v.items?.map((item) => item.description).join("; ") || "",
+      v.totalAmount,
+      "", // Net of VAT - not used in new structure
+      v.items
+        ?.reduce((sum, item) => sum + parseFloat(item.vatAmount || "0"), 0)
+        .toString() || "",
+      v.items
+        ?.reduce((sum, item) => sum + parseFloat(item.amountWithheld || "0"), 0)
+        .toString() || "",
+      v.items?.[0]?.chartOfAccount?.code || "",
     ]);
 
     const summaryRows = [
       [],
-      ["", "", "", "TOTALS:", totals.amount.toFixed(2), totals.netAmount.toFixed(2), totals.vat.toFixed(2), totals.withheld.toFixed(2), ""],
+      [
+        "",
+        "",
+        "",
+        "TOTALS:",
+        totals.amount.toFixed(2),
+        totals.netAmount.toFixed(2),
+        totals.vat.toFixed(2),
+        totals.withheld.toFixed(2),
+        "",
+      ],
       [],
       ["Replenishment Amount Needed:", totals.amount.toFixed(2)],
     ];
@@ -190,54 +223,73 @@ export default function Replenishment() {
             <Skeleton key={i} className="h-24" />
           ))}
         </div>
-      ) : fund && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          <Card>
-            <CardContent className="p-6">
-              <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-                Imprest Amount
-              </p>
-              <p className="font-mono text-2xl font-semibold mt-2" data-testid="text-imprest-amount">
-                {formatCurrency(fund.imprestAmount)}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-6">
-              <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-                Current Balance
-              </p>
-              <p className="font-mono text-2xl font-semibold mt-2" data-testid="text-current-balance">
-                {formatCurrency(fund.currentBalance)}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-6">
-              <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-                Total Disbursed
-              </p>
-              <p className="font-mono text-2xl font-semibold mt-2" data-testid="text-total-disbursed">
-                {formatCurrency(parseFloat(fund.imprestAmount) - parseFloat(fund.currentBalance))}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-6">
-              <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
-                Selected for Replenishment
-              </p>
-              <p className="font-mono text-2xl font-semibold mt-2" data-testid="text-selected-total">
-                {formatCurrency(totals.amount)}
-              </p>
-            </CardContent>
-          </Card>
-        </div>
+      ) : (
+        fund && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <Card>
+              <CardContent className="p-6">
+                <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+                  Imprest Amount
+                </p>
+                <p
+                  className="font-mono text-2xl font-semibold mt-2"
+                  data-testid="text-imprest-amount"
+                >
+                  {formatCurrency(fund.imprestAmount)}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-6">
+                <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+                  Current Balance
+                </p>
+                <p
+                  className="font-mono text-2xl font-semibold mt-2"
+                  data-testid="text-current-balance"
+                >
+                  {formatCurrency(fund.currentBalance)}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-6">
+                <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+                  Total Disbursed
+                </p>
+                <p
+                  className="font-mono text-2xl font-semibold mt-2"
+                  data-testid="text-total-disbursed"
+                >
+                  {formatCurrency(
+                    parseFloat(fund.imprestAmount) -
+                      parseFloat(fund.currentBalance)
+                  )}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-6">
+                <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+                  Selected for Replenishment
+                </p>
+                <p
+                  className="font-mono text-2xl font-semibold mt-2"
+                  data-testid="text-selected-total"
+                >
+                  {formatCurrency(totals.amount)}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+        )
       )}
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">
-          <CardTitle className="text-lg font-medium">Approved Vouchers</CardTitle>
+          <CardTitle className="text-lg font-medium">
+            Approved Vouchers
+          </CardTitle>
           <div className="flex flex-wrap items-center gap-3">
             <Button
               variant="outline"
@@ -253,7 +305,10 @@ export default function Replenishment() {
               <AlertDialogTrigger asChild>
                 <Button
                   size="sm"
-                  disabled={selectedVouchers.length === 0 || createReplenishment.isPending}
+                  disabled={
+                    selectedVouchers.length === 0 ||
+                    createReplenishment.isPending
+                  }
                   data-testid="button-request-replenishment"
                 >
                   {createReplenishment.isPending ? (
@@ -266,16 +321,21 @@ export default function Replenishment() {
               </AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Confirm Replenishment Request</AlertDialogTitle>
+                  <AlertDialogTitle>
+                    Confirm Replenishment Request
+                  </AlertDialogTitle>
                   <AlertDialogDescription>
-                    You are about to request replenishment for {selectedVouchers.length} vouchers
-                    totaling {formatCurrency(totals.amount)}. This will mark these vouchers as
-                    replenished and reset the fund balance.
+                    You are about to request replenishment for{" "}
+                    {selectedVouchers.length} vouchers totaling{" "}
+                    {formatCurrency(totals.amount)}. This will mark these
+                    vouchers as replenished and reset the fund balance.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction onClick={() => createReplenishment.mutate()}>
+                  <AlertDialogAction
+                    onClick={() => createReplenishment.mutate()}
+                  >
                     Confirm
                   </AlertDialogAction>
                 </AlertDialogFooter>
@@ -319,7 +379,11 @@ export default function Replenishment() {
                   {approvedVouchers.map((voucher) => (
                     <TableRow
                       key={voucher.id}
-                      className={selectedVouchers.includes(voucher.id) ? "bg-muted/50" : ""}
+                      className={
+                        selectedVouchers.includes(voucher.id)
+                          ? "bg-muted/50"
+                          : ""
+                      }
                       data-testid={`row-replenishment-voucher-${voucher.id}`}
                     >
                       <TableCell>
@@ -335,21 +399,47 @@ export default function Replenishment() {
                       <TableCell className="text-sm">
                         {format(new Date(voucher.date), "MMM d, yyyy")}
                       </TableCell>
-                      <TableCell className="font-medium">{voucher.payee}</TableCell>
+                      <TableCell className="font-medium">
+                        {voucher.payee}
+                      </TableCell>
                       <TableCell className="text-right font-mono">
-                        {formatCurrency(voucher.amount)}
+                        {formatCurrency(voucher.totalAmount)}
                       </TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
-                        {voucher.amountNetOfVat ? formatCurrency(voucher.amountNetOfVat) : "-"}
+                        -
                       </TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
-                        {voucher.vatAmount ? formatCurrency(voucher.vatAmount) : "-"}
+                        {voucher.items?.reduce(
+                          (sum, item) =>
+                            sum + parseFloat(item.vatAmount || "0"),
+                          0
+                        )
+                          ? formatCurrency(
+                              voucher.items.reduce(
+                                (sum, item) =>
+                                  sum + parseFloat(item.vatAmount || "0"),
+                                0
+                              )
+                            )
+                          : "-"}
                       </TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
-                        {voucher.amountWithheld ? formatCurrency(voucher.amountWithheld) : "-"}
+                        {voucher.items?.reduce(
+                          (sum, item) =>
+                            sum + parseFloat(item.amountWithheld || "0"),
+                          0
+                        )
+                          ? formatCurrency(
+                              voucher.items.reduce(
+                                (sum, item) =>
+                                  sum + parseFloat(item.amountWithheld || "0"),
+                                0
+                              )
+                            )
+                          : "-"}
                       </TableCell>
                       <TableCell className="font-mono text-sm text-muted-foreground">
-                        {voucher.chartOfAccount?.code || "-"}
+                        {voucher.items?.[0]?.chartOfAccount?.code || "-"}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -359,7 +449,9 @@ export default function Replenishment() {
           ) : (
             <div className="text-center py-12">
               <CheckCircle className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" />
-              <p className="text-muted-foreground">No approved vouchers available for replenishment</p>
+              <p className="text-muted-foreground">
+                No approved vouchers available for replenishment
+              </p>
             </div>
           )}
         </CardContent>
@@ -368,7 +460,9 @@ export default function Replenishment() {
       {selectedVouchers.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg font-medium">Replenishment Summary</CardTitle>
+            <CardTitle className="text-lg font-medium">
+              Replenishment Summary
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
@@ -376,7 +470,10 @@ export default function Replenishment() {
                 <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
                   Total Amount
                 </p>
-                <p className="font-mono text-xl font-semibold mt-1" data-testid="text-summary-total-amount">
+                <p
+                  className="font-mono text-xl font-semibold mt-1"
+                  data-testid="text-summary-total-amount"
+                >
                   {formatCurrency(totals.amount)}
                 </p>
               </div>
@@ -384,7 +481,10 @@ export default function Replenishment() {
                 <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
                   Total VAT
                 </p>
-                <p className="font-mono text-xl font-semibold mt-1" data-testid="text-summary-total-vat">
+                <p
+                  className="font-mono text-xl font-semibold mt-1"
+                  data-testid="text-summary-total-vat"
+                >
                   {formatCurrency(totals.vat)}
                 </p>
               </div>
@@ -392,7 +492,10 @@ export default function Replenishment() {
                 <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
                   Total Withheld
                 </p>
-                <p className="font-mono text-xl font-semibold mt-1" data-testid="text-summary-total-withheld">
+                <p
+                  className="font-mono text-xl font-semibold mt-1"
+                  data-testid="text-summary-total-withheld"
+                >
                   {formatCurrency(totals.withheld)}
                 </p>
               </div>
@@ -400,7 +503,10 @@ export default function Replenishment() {
                 <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
                   Net Amount
                 </p>
-                <p className="font-mono text-xl font-semibold mt-1" data-testid="text-summary-net-amount">
+                <p
+                  className="font-mono text-xl font-semibold mt-1"
+                  data-testid="text-summary-net-amount"
+                >
                   {formatCurrency(totals.netAmount)}
                 </p>
               </div>
@@ -408,12 +514,17 @@ export default function Replenishment() {
             <div className="mt-6 p-4 rounded-md bg-primary/10">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-medium text-primary">Replenishment Amount Needed</p>
+                  <p className="text-sm font-medium text-primary">
+                    Replenishment Amount Needed
+                  </p>
                   <p className="text-xs text-muted-foreground mt-1">
                     To restore fund to imprest amount
                   </p>
                 </div>
-                <p className="font-mono text-2xl font-semibold text-primary" data-testid="text-replenishment-needed">
+                <p
+                  className="font-mono text-2xl font-semibold text-primary"
+                  data-testid="text-replenishment-needed"
+                >
                   {formatCurrency(totals.amount)}
                 </p>
               </div>

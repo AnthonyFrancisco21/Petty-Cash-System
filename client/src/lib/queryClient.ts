@@ -10,7 +10,7 @@ async function throwIfResNotOk(res: Response) {
 export async function apiRequest(
   method: string,
   url: string,
-  data?: unknown | undefined,
+  data?: unknown | undefined
 ): Promise<Response> {
   const res = await fetch(url, {
     method,
@@ -29,16 +29,33 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
-      credentials: "include",
-    });
+    // Build URL from queryKey. Support forms like:
+    // ["/api/vouchers"] or ["/api/vouchers", { status: 'pending' }]
+    let url = "";
+    if (Array.isArray(queryKey) && typeof queryKey[0] === "string") {
+      url = queryKey[0];
+      const maybeParams = queryKey[1];
+      if (maybeParams && typeof maybeParams === "object") {
+        const params = new URLSearchParams();
+        for (const [k, v] of Object.entries(maybeParams as any)) {
+          if (v === undefined || v === null) continue;
+          params.append(k, String(v));
+        }
+        const qs = params.toString();
+        if (qs) url = `${url}?${qs}`;
+      }
+    } else {
+      url = String(queryKey.join("/"));
+    }
+
+    const res = await fetch(url, { credentials: "include" });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
-      return null;
+      return null as any;
     }
 
     await throwIfResNotOk(res);
-    return await res.json();
+    return (await res.json()) as any;
   };
 
 export const queryClient = new QueryClient({
