@@ -1,23 +1,22 @@
-# Attachment Upload Fix - TODO List
+# Fix Voucher Attachment Upload Issue
 
-## Database Schema Changes ✅
+## Current Problem
 
-- [x] Update shared/schema.ts: Change fileData to filePath in voucherAttachments table
-- [x] Update server/sql/init.sql: Modify the voucher_attachments table structure
+- When uploading attachments to vouchers, files are saved with random names without extensions
+- The filename should include voucher ID and payee, and preserve the file extension
 
-## Server-Side Changes ✅
+## Tasks
 
-- [x] Create server/uploads folder for storing uploaded files
-- [x] Update server/storage.ts: Modify attachment methods to save files to disk and store file paths in database
-- [x] Update server/routes.ts: Add upload/download routes for attachments
+- [x] Modify attachment upload route in server/routes.ts to generate proper filenames
+- [x] Fetch voucher information to get payee name
+- [x] Generate filename with format: {voucherId}_{payee}_{originalFilename}
+- [x] Ensure file extension is preserved
+- [x] Test the fix
 
-## Client-Side Changes ✅
+## Files to Modify
 
-- [x] Update client/src/pages/voucher-form.tsx: Use FormData instead of base64 conversion
-- [x] Update client/src/pages/vouchers.tsx: Already uses FormData, but may need adjustments
+- server/routes.ts (attachment upload route)
 
-## Testing ✅
+## Summary
 
-- [x] Test file upload functionality - Build completed successfully
-- [x] Test file download/view functionality - Build completed successfully
-- [x] Verify attachments are properly linked to vouchers - Build completed successfully
+Fixed the attachment upload issue by modifying the filename generation logic in server/routes.ts. Now files are saved with the format: {voucherId}_{sanitizedPayee}_{sanitizedBaseName}{extension}, preserving the original file extension and including voucher information in the filename.

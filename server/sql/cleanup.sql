@@ -109,7 +109,7 @@ CREATE TABLE voucher_attachments (
   file_name VARCHAR(255) NOT NULL,
   file_type VARCHAR(100) NOT NULL,
   file_size INTEGER NOT NULL,
-  file_data TEXT NOT NULL,
+  file_path VARCHAR(500) NOT NULL, -- FIXED: Changed from file_data to file_path
   uploaded_by_id INTEGER REFERENCES users(id),
   uploaded_at TIMESTAMP NOT NULL DEFAULT now()
 );

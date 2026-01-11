@@ -3,6 +3,8 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupAuth } from "./auth";
 import { createServer } from "http";
+import fs from "fs";
+import path from "path";
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -15,6 +17,16 @@ export function log(message: string, source = "express") {
 }
 
 (async () => {
+  // Ensure uploads directory exists
+  const uploadsDir = path.join(process.cwd(), "server", "uploads");
+  try {
+    await fs.promises.mkdir(uploadsDir, { recursive: true });
+    log(`Uploads directory ensured: ${uploadsDir}`);
+  } catch (error) {
+    log(`Failed to create uploads directory: ${error}`, "error");
+    process.exit(1);
+  }
+
   const app = express();
 
   // Standard Middlewares

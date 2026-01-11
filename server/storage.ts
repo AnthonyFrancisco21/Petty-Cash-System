@@ -106,6 +106,7 @@ export interface IStorage {
     attachment: InsertVoucherAttachment
   ): Promise<VoucherAttachment>;
   getVoucherAttachments(voucherId: number): Promise<VoucherAttachment[]>;
+  getVoucherAttachmentById(id: number): Promise<VoucherAttachment | undefined>;
   deleteVoucherAttachment(id: number): Promise<void>;
 }
 

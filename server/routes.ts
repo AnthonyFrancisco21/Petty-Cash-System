@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Response } from "express";
 import { storage } from "./storage";
 import {
   insertVoucherSchema,
@@ -7,10 +7,54 @@ import {
 } from "@shared/schema";
 import { z } from "zod";
 import multer from "multer";
+import path from "path";
+import fs from "fs";
 
-// Configure multer for file uploads
+// Configure multer for file uploads (old multer and uploads attchments code kept for reference)
+/* const multerStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(process.cwd(), "server", "uploads");
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate a temporary filename
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  },
+});
+
 const upload = multer({
-  dest: "server/uploads/",
+  storage: multerStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+}); */
+
+// Define where files are stored physically on the server
+const UPLOADS_DIR = path.join(process.cwd(), "server", "uploads");
+
+// Auto-create the directory if it doesn't exist
+if (!fs.existsSync(UPLOADS_DIR)) {
+  console.log(`[System] Creating uploads directory at: ${UPLOADS_DIR}`);
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+// Configure Multer for Disk Storage
+const uploadStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, UPLOADS_DIR);
+  },
+  filename: function (req, file, cb) {
+    // Sanitize filename and add timestamp to prevent collisions
+    const ext = path.extname(file.originalname);
+    const name = path
+      .basename(file.originalname, ext)
+      .replace(/[^a-zA-Z0-9]/g, "_");
+    const uniqueName = `${Date.now()}-${name}${ext}`;
+    cb(null, uniqueName);
+  },
+});
+
+const upload = multer({
+  storage: uploadStorage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
 });
 
@@ -51,6 +95,8 @@ function requireRole(...allowedRoles: string[]) {
 }
 
 export async function registerRoutes(app: Express): Promise<void> {
+  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+
   // Auth middleware helper using passport sessions
   const isAuthenticated = (req: any, res: any, next: any) => {
     if (!req.isAuthenticated || !req.isAuthenticated()) {
@@ -678,6 +724,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   );
 
   // Voucher attachment routes
+  // 1. GET Attachments
   app.get(
     "/api/vouchers/:id/attachments",
     isAuthenticated,
@@ -693,165 +740,139 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   );
 
+  // 2. POST Attachment (Upload)
   app.post(
     "/api/vouchers/:id/attachments",
     isAuthenticated,
-    (req: any, res: any, next: any) => {
-      upload.single("file")(req, res, (err: any) => {
-        if (err) {
-          return res
-            .status(400)
-            .json({ message: "File upload error", error: err.message });
-        }
-        next();
-      });
-    },
-    async (req: any, res) => {
+    upload.single("file"), // Middleware processes file before the async function below
+    async (req: any, res: any) => {
+      // Validation: Did Multer receive a file?
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
+
+      const { id } = req.params;
+      const voucherId = parseInt(id);
+
+      // Validation: Invalid ID?
+      if (isNaN(voucherId)) {
+        // Clean up uploaded file since request is invalid
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ message: "Invalid voucher ID" });
+      }
+
+      console.log(
+        `[Upload] Received file for Voucher ${voucherId}: ${req.file.originalname}`
+      );
+
       try {
-        console.log(
-          "Attachment upload request received for voucher:",
-          req.params.id
-        );
-        console.log(
-          "File info:",
-          req.file
-            ? {
-                originalname: req.file.originalname,
-                mimetype: req.file.mimetype,
-                size: req.file.size,
-                path: req.file.path,
-              }
-            : "No file"
-        );
-
-        const { id } = req.params;
-        const userIdRaw = req.user.id;
-        const userId =
-          typeof userIdRaw === "string" ? parseInt(userIdRaw) : userIdRaw;
-
-        if (!req.file) {
-          console.log("No file uploaded in request");
-          return res.status(400).json({ message: "No file uploaded" });
+        const userId = req.user?.id
+          ? typeof req.user.id === "string"
+            ? parseInt(req.user.id)
+            : req.user.id
+          : null;
+        if (!userId) {
+          fs.unlinkSync(req.file.path); // Cleanup
+          return res.status(401).json({ message: "Unauthorized" });
         }
 
-        // Check if voucher exists
-        try {
-          const voucher = await storage.getVoucherById(parseInt(id));
-          console.log(
-            `Voucher lookup result:`,
-            voucher ? `Found voucher ${voucher.id}` : "Voucher not found"
-          );
-          if (!voucher) {
-            console.log(`Returning 404 for non-existent voucher ${id}`);
-            return res.status(404).json({ message: "Voucher not found" });
-          }
-        } catch (dbError) {
-          console.error(`Database error checking voucher ${id}:`, dbError);
-          return res
-            .status(500)
-            .json({ message: "Database error checking voucher" });
+        // Check if Voucher Exists
+        const voucher = await storage.getVoucherById(voucherId);
+        if (!voucher) {
+          fs.unlinkSync(req.file.path); // Cleanup
+          return res.status(404).json({ message: "Voucher not found" });
         }
 
-        const fsPromises = require("fs").promises;
-        const fs = require("fs");
-        const path = require("path");
+        // Calculate Relative Path for DB (e.g., "server/uploads/123-file.pdf")
+        const relativePath = path.relative(process.cwd(), req.file.path);
 
-        // Generate unique filename
-        const uniqueName = `${Date.now()}-${Math.random()
-          .toString(36)
-          .substring(2, 15)}-${req.file.originalname}`;
-        const filePath = path.resolve("server/uploads", uniqueName);
-
-        console.log(`Generated file path: ${filePath}`);
-        console.log(`Temp file location: ${req.file.path}`);
-
-        // Move file from temp location to permanent location. Handle cross-device rename.
-        try {
-          await fsPromises.rename(req.file.path, filePath);
-          console.log("File moved successfully");
-        } catch (fileError: any) {
-          console.warn(
-            "Rename failed, attempting copy+unlink fallback:",
-            fileError?.code
-          );
-          try {
-            await fsPromises.copyFile(req.file.path, filePath);
-            await fsPromises.unlink(req.file.path);
-            console.log("File copied and temp removed successfully");
-          } catch (copyError) {
-            console.error("Error saving file (copy fallback):", copyError);
-            return res.status(500).json({ message: "Failed to save file" });
-          }
-        }
-
+        // Prepare DB Record
         const attachmentData = {
-          voucherId: parseInt(id),
+          voucherId: voucherId,
           fileName: req.file.originalname,
           fileType: req.file.mimetype,
           fileSize: req.file.size,
-          filePath: filePath,
+          filePath: relativePath, // MATCHES SCHEMA NOW
           uploadedById: userId,
         };
 
-        try {
-          const attachment = await storage.createVoucherAttachment(
-            attachmentData
-          );
-          console.log("Attachment created successfully:", attachment.id);
+        // Insert into DB
+        const attachment = await storage.createVoucherAttachment(
+          attachmentData
+        );
 
-          try {
-            await storage.createAuditLog({
-              entityType: "voucher",
-              entityId: id,
-              action: "attachment_added",
-              newValue: {
-                fileName: req.file.originalname,
-                fileType: req.file.mimetype,
-              },
-              userId,
-              description: `Added attachment: ${req.file.originalname}`,
-            });
-            console.log("Audit log created successfully");
-          } catch (auditError) {
-            console.error("Error creating audit log:", auditError);
-            // Don't fail the request for audit log errors
-          }
+        // Audit Log (Fire and forget)
+        storage
+          .createAuditLog({
+            entityType: "voucher",
+            entityId: String(id),
+            action: "attachment_added",
+            newValue: { fileName: req.file.originalname },
+            userId,
+            description: `Added attachment: ${req.file.originalname}`,
+          })
+          .catch((err) => console.error("Audit log failed:", err));
 
-          console.log("Attachment upload completed successfully");
-          res.status(201).json(attachment);
-        } catch (dbError) {
-          console.error("Error creating attachment in database:", dbError);
-          return res
-            .status(500)
-            .json({ message: "Failed to create attachment record" });
-        }
+        console.log(`[Upload] Success: Attachment ID ${attachment.id}`);
+        res.status(201).json(attachment);
       } catch (error) {
-        console.error("Error creating attachment:", error);
-        res.status(500).json({ message: "Failed to create attachment" });
+        console.error("[Upload] Error:", error);
+
+        // Cleanup file if DB insert failed
+        if (req.file?.path && fs.existsSync(req.file.path)) {
+          fs.unlink(req.file.path, (err) => {
+            if (err) console.error("Cleanup failed:", err);
+          });
+        }
+
+        return res
+          .status(500)
+          .json({ message: "Failed to save attachment record" });
       }
     }
   );
 
-  // Allow deleting an attachment using voucher-scoped URL (client expects this)
+  // 3. DELETE Attachment
   app.delete(
     "/api/vouchers/:id/attachments/:attachmentId",
     isAuthenticated,
-    async (req: any, res: any) => {
+    async (req: any, res: Response) => {
       try {
         const { attachmentId } = req.params;
-        const userIdRaw = req.user.id;
-        const userId =
-          typeof userIdRaw === "string" ? parseInt(userIdRaw) : userIdRaw;
+        const attachment = await storage.getVoucherAttachmentById(
+          parseInt(attachmentId)
+        );
 
-        await storage.deleteVoucherAttachment(parseInt(attachmentId));
+        if (attachment) {
+          // 1. Delete file from disk
+          const fullPath = path.resolve(process.cwd(), attachment.filePath);
+          if (fs.existsSync(fullPath)) {
+            fs.unlinkSync(fullPath);
+          } else {
+            console.warn(`[Delete] File not found on disk: ${fullPath}`);
+          }
 
-        await storage.createAuditLog({
-          entityType: "attachment",
-          entityId: attachmentId,
-          action: "deleted",
-          userId,
-          description: `Deleted attachment ${attachmentId}`,
-        });
+          // 2. Delete record from DB
+          await storage.deleteVoucherAttachment(parseInt(attachmentId));
+
+          // 3. Audit Log
+          const userId = req.user?.id
+            ? typeof req.user.id === "string"
+              ? parseInt(req.user.id)
+              : req.user.id
+            : null;
+          if (userId) {
+            storage
+              .createAuditLog({
+                entityType: "attachment",
+                entityId: attachmentId,
+                action: "deleted",
+                userId,
+                description: `Deleted attachment: ${attachment.fileName}`,
+              })
+              .catch(console.error);
+          }
+        }
 
         res.status(204).send();
       } catch (error) {
@@ -861,75 +882,39 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   );
 
-  // Download attachment route
+  // 4. DOWNLOAD Attachment
   app.get(
     "/api/attachments/:id/download",
     isAuthenticated,
     async (req, res) => {
       try {
         const { id } = req.params;
-
-        // Get attachment info from database
         const attachment = await storage.getVoucherAttachmentById(parseInt(id));
 
         if (!attachment) {
           return res.status(404).json({ message: "Attachment not found" });
         }
 
-        const fs = require("fs");
-        const path = require("path");
-        const fullPath = path.resolve(attachment.filePath);
+        const fullPath = path.resolve(process.cwd(), attachment.filePath);
 
-        // Check if file exists
         if (!fs.existsSync(fullPath)) {
-          return res.status(404).json({ message: "File not found on disk" });
+          return res.status(404).json({ message: "File missing from server" });
         }
 
-        // Set appropriate headers
         res.setHeader("Content-Type", attachment.fileType);
         res.setHeader(
           "Content-Disposition",
           `attachment; filename="${attachment.fileName}"`
         );
 
-        // Stream the file
         const fileStream = fs.createReadStream(fullPath);
         fileStream.pipe(res);
-
-        fileStream.on("error", (error: any) => {
-          console.error("Error streaming file:", error);
-          res.status(500).json({ message: "Error downloading file" });
-        });
       } catch (error) {
-        console.error("Error downloading attachment:", error);
-        res.status(500).json({ message: "Failed to download attachment" });
+        console.error("Download error:", error);
+        res.status(500).json({ message: "Failed to download file" });
       }
     }
   );
-
-  app.delete("/api/attachments/:id", isAuthenticated, async (req: any, res) => {
-    try {
-      const { id } = req.params;
-      const userIdRaw = req.user.id;
-      const userId =
-        typeof userIdRaw === "string" ? parseInt(userIdRaw) : userIdRaw;
-
-      await storage.deleteVoucherAttachment(parseInt(id));
-
-      await storage.createAuditLog({
-        entityType: "attachment",
-        entityId: id,
-        action: "deleted",
-        userId,
-        description: `Deleted attachment`,
-      });
-
-      res.status(204).send();
-    } catch (error) {
-      console.error("Error deleting attachment:", error);
-      res.status(500).json({ message: "Failed to delete attachment" });
-    }
-  });
 
   // Disbursement summary reports route
   app.get(
