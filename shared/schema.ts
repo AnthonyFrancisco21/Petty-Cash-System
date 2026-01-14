@@ -25,7 +25,7 @@ export const users = pgTable("users", {
 });
 
 // User roles
-export type UserRole = "preparer" | "approver" | "admin";
+export type UserRole = "pending_role" | "preparer" | "approver" | "admin";
 
 export const usersRelations = relations(users, ({ many }) => ({
   requestedVouchers: many(vouchers, { relationName: "requester" }),

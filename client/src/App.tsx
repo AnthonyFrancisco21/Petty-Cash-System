@@ -26,6 +26,7 @@ import {
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/landing";
 import AuthPage from "@/pages/auth";
+import PendingPage from "@/pages/pending";
 import Dashboard from "@/pages/dashboard";
 import AdminDashboard from "@/pages/admin-dashboard";
 import Vouchers from "@/pages/vouchers";
@@ -155,9 +156,15 @@ function Router() {
     );
   }
 
+  const isPending = user?.role === "pending_role";
   const isAdmin = hasAdminAccess(user?.role || "");
   const isPreparer = user?.role === "preparer";
   const isApprover = user?.role === "approver";
+
+  // Pending users see a different layout without sidebar
+  if (isPending) {
+    return <PendingPage />;
+  }
 
   return (
     <AuthenticatedLayout>

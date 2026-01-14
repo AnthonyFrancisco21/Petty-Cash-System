@@ -171,7 +171,6 @@ export default function UsersPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>User</TableHead>
-                    <TableHead>Email</TableHead>
                     <TableHead>Role</TableHead>
                     <TableHead>Joined</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
