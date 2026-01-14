@@ -58,7 +58,7 @@ CREATE TABLE voucher_items (
   description TEXT NOT NULL,
   amount NUMERIC(15,2) NOT NULL,
   chart_of_account_id INTEGER REFERENCES chart_of_accounts(id),
-  invoice_number VARCHAR(100),
+  voucher_number VARCHAR(100),
   vat_amount NUMERIC(15,2),
   amount_withheld NUMERIC(15,2),
   created_at TIMESTAMP DEFAULT now()

@@ -42,9 +42,17 @@ export interface IStorage {
   // Voucher operations
   getVouchers(status?: string): Promise<Voucher[]>;
   getVoucherById(id: number): Promise<Voucher | undefined>;
-  createVoucher(
-    voucher: InsertVoucher & { voucherNumber: string }
-  ): Promise<Voucher>;
+  createVoucher(voucher: {
+    voucherNumber: string;
+    date: Date;
+    payee: string;
+    totalAmount: string;
+    requestedById: number;
+    approvedById?: number | null;
+    status: string;
+    supportingDocsSubmitted?: Date | null;
+    items: InsertVoucherItem[];
+  }): Promise<Voucher>;
   updateVoucherStatus(
     id: number,
     status: string,
@@ -77,7 +85,7 @@ export interface IStorage {
 
   // Replenishment operations
   createReplenishmentRequest(
-    request: InsertReplenishmentRequest
+    request: InsertReplenishmentRequest & { voucherIds: number[] }
   ): Promise<ReplenishmentRequest>;
   getReplenishmentRequests(): Promise<ReplenishmentRequest[]>;
 
@@ -85,6 +93,19 @@ export interface IStorage {
   createAuditLog(log: InsertAuditLog): Promise<AuditLog>;
   getAuditLogs(entityType?: string, entityId?: string): Promise<any[]>;
   getRecentAuditLogs(limit?: number): Promise<any[]>;
+  getAuditLogsPaginated(
+    limit: number,
+    offset: number,
+    filters?: {
+      entityType?: string;
+      entityId?: string;
+      userId?: number;
+      action?: string;
+      startDate?: Date;
+      endDate?: Date;
+    }
+  ): Promise<{ logs: any[]; total: number }>;
+  cleanupObsoleteAuditLogs(): Promise<number>;
 
   // Budget tracking operations
   createAccountBudget(budget: InsertAccountBudget): Promise<AccountBudget>;
@@ -189,12 +210,17 @@ export class DatabaseStorage implements IStorage {
     return voucher;
   }
 
-  async createVoucher(
-    voucher: InsertVoucher & {
-      voucherNumber: string;
-      items: InsertVoucherItem[];
-    }
-  ): Promise<Voucher> {
+  async createVoucher(voucher: {
+    voucherNumber: string;
+    date: Date;
+    payee: string;
+    totalAmount: string;
+    requestedById: number;
+    approvedById?: number | null;
+    status: string;
+    supportingDocsSubmitted?: Date | null;
+    items: InsertVoucherItem[];
+  }): Promise<Voucher> {
     // Start transaction
     const result = await db.transaction(async (tx) => {
       // Create voucher header
@@ -220,7 +246,6 @@ export class DatabaseStorage implements IStorage {
             description: item.description,
             amount: item.amount,
             chartOfAccountId: item.chartOfAccountId,
-            invoiceNumber: item.invoiceNumber,
             vatAmount: item.vatAmount,
             amountWithheld: item.amountWithheld,
           }))
@@ -321,11 +346,16 @@ export class DatabaseStorage implements IStorage {
         chartOfAccount: item.chart_of_accounts,
       }));
 
+      // Get attachment count
+      const attachments = await this.getVoucherAttachments(v.id);
+      const attachmentCount = attachments.length;
+
       result.push({
         ...v,
         requester,
         approver,
         items: voucherItemsWithCoa,
+        attachmentCount,
       });
     }
 
@@ -371,6 +401,30 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteChartOfAccount(id: number): Promise<void> {
+    // Check for references in voucherItems
+    const voucherItemRefs = await db
+      .select()
+      .from(voucherItems)
+      .where(eq(voucherItems.chartOfAccountId, id));
+
+    if (voucherItemRefs.length > 0) {
+      throw new Error(
+        `Cannot delete chart of account: it is referenced by ${voucherItemRefs.length} voucher item(s)`
+      );
+    }
+
+    // Check for references in accountBudgets
+    const budgetRefs = await db
+      .select()
+      .from(accountBudgets)
+      .where(eq(accountBudgets.chartOfAccountId, id));
+
+    if (budgetRefs.length > 0) {
+      throw new Error(
+        `Cannot delete chart of account: it is referenced by ${budgetRefs.length} budget(s)`
+      );
+    }
+
     await db.delete(chartOfAccounts).where(eq(chartOfAccounts.id, id));
   }
 
@@ -402,7 +456,7 @@ export class DatabaseStorage implements IStorage {
 
   // Replenishment operations
   async createReplenishmentRequest(
-    request: InsertReplenishmentRequest
+    request: InsertReplenishmentRequest & { voucherIds: number[] }
   ): Promise<ReplenishmentRequest> {
     const [created] = await db
       .insert(replenishmentRequests)
@@ -410,11 +464,11 @@ export class DatabaseStorage implements IStorage {
       .returning();
 
     // Mark vouchers as replenished
-    if ((request as any).voucherIds && (request as any).voucherIds.length > 0) {
+    if (request.voucherIds && request.voucherIds.length > 0) {
       await db
         .update(vouchers)
         .set({ status: "replenished" })
-        .where(inArray(vouchers.id, (request as any).voucherIds));
+        .where(inArray(vouchers.id, request.voucherIds));
 
       // Restore fund balance
       const fund = await this.getFund();
@@ -509,6 +563,80 @@ export class DatabaseStorage implements IStorage {
       result.push({ ...log, user });
     }
     return result;
+  }
+
+  async getAuditLogsPaginated(
+    limit: number,
+    offset: number,
+    filters?: {
+      entityType?: string;
+      entityId?: string;
+      userId?: number;
+      action?: string;
+      startDate?: Date;
+      endDate?: Date;
+    }
+  ): Promise<{ logs: any[]; total: number }> {
+    let whereConditions = [];
+
+    if (filters?.entityType) {
+      whereConditions.push(eq(auditLogs.entityType, filters.entityType));
+    }
+    if (filters?.entityId) {
+      whereConditions.push(eq(auditLogs.entityId, filters.entityId));
+    }
+    if (filters?.userId) {
+      whereConditions.push(eq(auditLogs.userId, filters.userId));
+    }
+    if (filters?.action) {
+      whereConditions.push(eq(auditLogs.action, filters.action));
+    }
+    if (filters?.startDate) {
+      whereConditions.push(gte(auditLogs.timestamp, filters.startDate));
+    }
+    if (filters?.endDate) {
+      whereConditions.push(lte(auditLogs.timestamp, filters.endDate));
+    }
+
+    const whereClause =
+      whereConditions.length > 0 ? and(...whereConditions) : undefined;
+
+    // Get total count
+    const totalResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(auditLogs)
+      .where(whereClause);
+
+    const total = totalResult[0]?.count || 0;
+
+    // Get paginated logs
+    const logs = await db
+      .select()
+      .from(auditLogs)
+      .where(whereClause)
+      .orderBy(desc(auditLogs.timestamp))
+      .limit(limit)
+      .offset(offset);
+
+    const result = [];
+    for (const log of logs) {
+      const user = log.userId ? await this.getUser(log.userId) : null;
+      result.push({ ...log, user });
+    }
+
+    return { logs: result, total };
+  }
+
+  async cleanupObsoleteAuditLogs(): Promise<number> {
+    // Delete audit logs older than 1 year
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+    const result = await db
+      .delete(auditLogs)
+      .where(lte(auditLogs.timestamp, oneYearAgo));
+
+    return result.rowCount || 0;
   }
 
   // Budget tracking operations

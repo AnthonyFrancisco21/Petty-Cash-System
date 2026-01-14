@@ -4,6 +4,7 @@ import {
   insertVoucherSchema,
   insertChartOfAccountSchema,
   insertPettyCashFundSchema,
+  insertReplenishmentRequestSchema,
 } from "@shared/schema";
 import { z } from "zod";
 import multer from "multer";
@@ -233,7 +234,6 @@ export async function registerRoutes(app: Express): Promise<void> {
           chartOfAccountId: item.chartOfAccountId
             ? parseInt(item.chartOfAccountId)
             : null,
-          invoiceNumber: item.invoiceNumber || null,
           vatAmount: item.vatAmount || null,
           amountWithheld: item.amountWithheld || null,
         });
@@ -246,7 +246,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         approvedById: req.body.approvedById || null,
         status: req.body.status || "pending",
         requestedById: userId,
-        voucherNumber: generateVoucherNumber(),
+        voucherNumber: req.body.voucherNumber,
         items: validatedItems,
       };
 
@@ -426,6 +426,9 @@ export async function registerRoutes(app: Express): Promise<void> {
         res.status(204).send();
       } catch (error) {
         console.error("Error deleting chart of account:", error);
+        if (error instanceof Error && error.message.includes("Cannot delete")) {
+          return res.status(400).json({ message: error.message });
+        }
         res.status(500).json({ message: "Failed to delete chart of account" });
       }
     }
@@ -448,7 +451,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.post(
     "/api/fund",
     isAuthenticated,
-    requireRole("preparer", "admin"),
+    requireRole("approver", "admin"),
     async (req: any, res) => {
       try {
         const userIdRaw = req.user.id;
@@ -525,16 +528,6 @@ export async function registerRoutes(app: Express): Promise<void> {
         const userId =
           typeof userIdRaw === "string" ? parseInt(userIdRaw) : userIdRaw;
 
-        if (
-          !req.body.voucherIds ||
-          !Array.isArray(req.body.voucherIds) ||
-          req.body.voucherIds.length === 0
-        ) {
-          return res.status(400).json({
-            message: "At least one voucher must be selected for replenishment",
-          });
-        }
-
         const requestData = {
           requestDate: new Date(),
           totalAmount: req.body.totalAmount || "0",
@@ -546,7 +539,14 @@ export async function registerRoutes(app: Express): Promise<void> {
           status: "pending",
         };
 
-        const request = await storage.createReplenishmentRequest(requestData);
+        const result = insertReplenishmentRequestSchema.safeParse(requestData);
+        if (!result.success) {
+          return res
+            .status(400)
+            .json({ message: "Invalid data", errors: result.error.errors });
+        }
+
+        const request = await storage.createReplenishmentRequest(result.data);
 
         // Log the replenishment action
         await storage.createAuditLog({
@@ -555,7 +555,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           action: "created",
           newValue: request,
           userId,
-          description: `Created replenishment request for ${req.body.voucherIds.length} vouchers totaling ${req.body.totalAmount}`,
+          description: `Created replenishment request for ${result.data.voucherIds.length} vouchers totaling ${result.data.totalAmount}`,
         });
 
         res.status(201).json(request);
@@ -572,26 +572,71 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.get(
     "/api/audit-logs",
     isAuthenticated,
-    requireRole("preparer", "admin"),
+    requireRole("approver"),
     async (req, res) => {
       try {
-        const { entityType, entityId, limit } = req.query;
+        const {
+          entityType,
+          entityId,
+          limit,
+          offset,
+          userId,
+          action,
+          startDate,
+          endDate,
+        } = req.query;
 
+        // If limit and offset are provided, use paginated version
+        if (limit && offset) {
+          const filters = {
+            entityType: entityType as string,
+            entityId: entityId as string,
+            userId: userId ? parseInt(userId as string) : undefined,
+            action: action as string,
+            startDate: startDate ? new Date(startDate as string) : undefined,
+            endDate: endDate ? new Date(endDate as string) : undefined,
+          };
+
+          const result = await storage.getAuditLogsPaginated(
+            parseInt(limit as string),
+            parseInt(offset as string),
+            filters
+          );
+          return res.json(result);
+        }
+
+        // Legacy support for old endpoints
         if (limit) {
           const logs = await storage.getRecentAuditLogs(
             parseInt(limit as string)
           );
-          return res.json(logs);
+          return res.json({ logs, total: logs.length });
         }
 
         const logs = await storage.getAuditLogs(
           entityType as string | undefined,
           entityId as string | undefined
         );
-        res.json(logs);
+        res.json({ logs, total: logs.length });
       } catch (error) {
         console.error("Error fetching audit logs:", error);
         res.status(500).json({ message: "Failed to fetch audit logs" });
+      }
+    }
+  );
+
+  // Cleanup obsolete audit logs
+  app.delete(
+    "/api/audit-logs/cleanup",
+    isAuthenticated,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const deletedCount = await storage.cleanupObsoleteAuditLogs();
+        res.json({ message: `Cleaned up ${deletedCount} obsolete audit logs` });
+      } catch (error) {
+        console.error("Error cleaning up audit logs:", error);
+        res.status(500).json({ message: "Failed to cleanup audit logs" });
       }
     }
   );
@@ -882,7 +927,34 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   );
 
-  // 4. DOWNLOAD Attachment
+  // 4. VIEW Attachment (inline display)
+  app.get("/api/attachments/:id/view", isAuthenticated, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const attachment = await storage.getVoucherAttachmentById(parseInt(id));
+
+      if (!attachment) {
+        return res.status(404).json({ message: "Attachment not found" });
+      }
+
+      const fullPath = path.resolve(process.cwd(), attachment.filePath);
+
+      if (!fs.existsSync(fullPath)) {
+        return res.status(404).json({ message: "File missing from server" });
+      }
+
+      res.setHeader("Content-Type", attachment.fileType);
+      // No Content-Disposition header for inline viewing
+
+      const fileStream = fs.createReadStream(fullPath);
+      fileStream.pipe(res);
+    } catch (error) {
+      console.error("View error:", error);
+      res.status(500).json({ message: "Failed to view file" });
+    }
+  });
+
+  // 5. DOWNLOAD Attachment
   app.get(
     "/api/attachments/:id/download",
     isAuthenticated,

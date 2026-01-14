@@ -1,13 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -49,8 +43,10 @@ import {
   Eye,
   User,
   Calendar,
+  ExternalLink,
 } from "lucide-react";
 import { format } from "date-fns";
+import * as XLSX from "xlsx";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { isUnauthorizedError } from "@/lib/authUtils";
@@ -97,12 +93,14 @@ interface VoucherDetailDialogProps {
   voucher: VoucherWithRelations | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onViewAttachment: (attachment: any) => void;
 }
 
 function VoucherDetailDialog({
   voucher,
   open,
   onOpenChange,
+  onViewAttachment,
 }: VoucherDetailDialogProps) {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -139,6 +137,9 @@ function VoucherDetailDialog({
       queryClient.invalidateQueries({
         queryKey: [`/api/vouchers/${voucher?.id}/attachments`],
       });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/vouchers"],
+      });
     },
     onError: (error: Error) => {
       if (isUnauthorizedError(error)) {
@@ -174,6 +175,9 @@ function VoucherDetailDialog({
       queryClient.invalidateQueries({
         queryKey: [`/api/vouchers/${voucher?.id}/attachments`],
       });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/vouchers"],
+      });
     },
     onError: (error: Error) => {
       if (isUnauthorizedError(error)) {
@@ -207,13 +211,95 @@ function VoucherDetailDialog({
       user.role === "preparer" ||
       (voucher && voucher.requestedById === user.id));
 
+  const handleExportExcel = () => {
+    if (!voucher) return;
+
+    const workbook = XLSX.utils.book_new();
+
+    // Sheet 1: Voucher Details
+    const voucherData = [
+      ["Petty Cash Voucher"],
+      [],
+      ["Voucher Number", voucher.voucherNumber],
+      ["Payee", voucher.payee],
+      ["Date", format(new Date(voucher.date), "MMMM d, yyyy")],
+      ["Total Amount", formatCurrency(voucher.totalAmount)],
+      ["Status", voucher.status],
+      [],
+      ["Items"],
+      ["Description", "Amount", "VAT", "Withheld", "Chart of Account"],
+    ];
+
+    voucher.items?.forEach((item) => {
+      voucherData.push([
+        item.description,
+        formatCurrency(item.amount),
+        item.vatAmount ? formatCurrency(item.vatAmount) : "",
+        item.amountWithheld ? formatCurrency(item.amountWithheld) : "",
+        item.chartOfAccount
+          ? `${item.chartOfAccount.code} - ${item.chartOfAccount.name}`
+          : "",
+      ]);
+    });
+
+    voucherData.push([]);
+    voucherData.push([
+      "Requested By",
+      voucher.requester
+        ? `${voucher.requester.firstName} ${voucher.requester.lastName}`
+        : "",
+    ]);
+    voucherData.push([
+      "Approved By",
+      voucher.approver
+        ? `${voucher.approver.firstName} ${voucher.approver.lastName}`
+        : "",
+    ]);
+
+    const voucherSheet = XLSX.utils.aoa_to_sheet(voucherData);
+    XLSX.utils.book_append_sheet(workbook, voucherSheet, "Voucher Details");
+
+    // Sheet 2: Attachments
+    if (attachments && attachments.length > 0) {
+      const attachmentData = [
+        ["Attachments"],
+        [],
+        ["File Name", "Uploaded At"],
+      ];
+
+      attachments.forEach((attachment) => {
+        attachmentData.push([
+          attachment.fileName,
+          format(new Date(attachment.uploadedAt), "MMMM d, yyyy h:mm a"),
+        ]);
+      });
+
+      const attachmentSheet = XLSX.utils.aoa_to_sheet(attachmentData);
+      XLSX.utils.book_append_sheet(workbook, attachmentSheet, "Attachments");
+    }
+
+    // Generate and download the file
+    const fileName = `voucher-${voucher.voucherNumber}-${format(
+      new Date(),
+      "yyyy-MM-dd"
+    )}.xlsx`;
+    XLSX.writeFile(workbook, fileName);
+  };
+
   if (!voucher) return null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-3">
+          <DialogTitle className="flex flex-col items-start gap-3">
+            <div className="flex justify-start mb-4">
+              <Button variant="outline" size="sm" onClick={handleExportExcel}>
+                <Download className="h-4 w-4 mr-2" />
+                Export to Excel
+              </Button>
+            </div>
+
             <span className="font-mono">{voucher.voucherNumber}</span>
             <Badge variant={getStatusVariant(voucher.status)}>
               {getStatusIcon(voucher.status)}
@@ -285,14 +371,7 @@ function VoucherDetailDialog({
                         </p>
                       </div>
                     )}
-                    {item.invoiceNumber && (
-                      <div>
-                        <p className="text-sm text-muted-foreground">
-                          Invoice Number
-                        </p>
-                        <p className="font-mono">{item.invoiceNumber}</p>
-                      </div>
-                    )}
+
                     {item.chartOfAccount && (
                       <div>
                         <p className="text-sm text-muted-foreground">
@@ -380,16 +459,20 @@ function VoucherDetailDialog({
                 {attachments.map((attachment) => (
                   <div
                     key={attachment.id}
-                    className="flex items-center justify-between p-3 bg-muted/50 rounded-md"
+                    className="flex items-center justify-between p-3 bg-muted/50 rounded-md w-full overflow-hidden"
                     data-testid={`attachment-${attachment.id}`}
                   >
-                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                    {/* Left Side Container: Constraints long text */}
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
                       <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                      <div className="min-w-0">
-                        <p className="font-medium truncate">
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className="font-medium text-sm truncate"
+                          title={attachment.fileName}
+                        >
                           {attachment.fileName}
                         </p>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-xs text-muted-foreground truncate">
                           {format(
                             new Date(attachment.uploadedAt),
                             "MMM d, yyyy h:mm a"
@@ -397,16 +480,14 @@ function VoucherDetailDialog({
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+
+                    {/* Right Side Container: Fixed actions */}
+                    <div className="flex items-center gap-1 flex-shrink-0 ml-2">
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() =>
-                          window.open(
-                            `/api/attachments/${attachment.id}/download`,
-                            "_blank"
-                          )
-                        }
+                        className="h-8 w-8"
+                        onClick={() => onViewAttachment(attachment)}
                         data-testid={`button-view-attachment-${attachment.id}`}
                       >
                         <Eye className="h-4 w-4" />
@@ -415,6 +496,7 @@ function VoucherDetailDialog({
                         <Button
                           variant="ghost"
                           size="icon"
+                          className="h-8 w-8 text-destructive hover:text-destructive"
                           onClick={() => deleteAttachment.mutate(attachment.id)}
                           disabled={deleteAttachment.isPending}
                           data-testid={`button-delete-attachment-${attachment.id}`}
@@ -444,6 +526,92 @@ function VoucherDetailDialog({
   );
 }
 
+function AttachmentViewerDialog({
+  attachment,
+  open,
+  onOpenChange,
+}: {
+  attachment: any;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!attachment) return null;
+
+  const isImage = attachment.fileType?.startsWith("image/");
+  const isPDF = attachment.fileType === "application/pdf";
+  const viewUrl = `/api/attachments/${attachment.id}/view`;
+  const downloadUrl = `/api/attachments/${attachment.id}/download`;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-5xl w-[95vw] h-[85vh] p-0 gap-0 flex flex-col bg-background overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b flex-none">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileText className="h-5 w-5 text-primary flex-shrink-0" />
+            <span className="text-base font-medium truncate">
+              {attachment.fileName}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0 pr-8">
+            <Button
+              variant="outline"
+              size="sm"
+              className="hidden sm:flex"
+              onClick={() => window.open(viewUrl, "_blank")}
+            >
+              <ExternalLink className="h-4 w-4 mr-2" />
+              Open New Tab
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => window.open(downloadUrl, "_blank")}
+            >
+              <Download className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Download</span>
+            </Button>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 w-full relative overflow-hidden bg-muted/20">
+          {isImage ? (
+            <div className="w-full h-full flex items-center justify-center p-4">
+              <img
+                src={viewUrl}
+                alt={attachment.fileName}
+                className="max-w-full max-h-full w-auto h-auto object-contain rounded shadow-sm"
+              />
+            </div>
+          ) : isPDF ? (
+            <iframe
+              src={viewUrl}
+              className="w-full h-full border-0"
+              title={attachment.fileName}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full text-center p-6">
+              <div className="bg-muted p-6 rounded-full mb-4">
+                <FileText className="h-12 w-12 text-muted-foreground" />
+              </div>
+              <h3 className="text-lg font-medium mb-2">Preview Unavailable</h3>
+              <p className="text-muted-foreground mb-6 max-w-sm">
+                This file type cannot be previewed directly in the browser.
+                Please download the file to view it.
+              </p>
+              <Button onClick={() => window.open(downloadUrl, "_blank")}>
+                <Download className="h-4 w-4 mr-2" />
+                Download File
+              </Button>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Vouchers() {
   const { user } = useAuth();
   const [search, setSearch] = useState("");
@@ -451,6 +619,8 @@ export default function Vouchers() {
   const [selectedVoucher, setSelectedVoucher] =
     useState<VoucherWithRelations | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [isAttachmentViewerOpen, setIsAttachmentViewerOpen] = useState(false);
+  const [attachmentToView, setAttachmentToView] = useState<any>(null);
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const [pages, setPages] = useState<VoucherWithRelations[][]>([]);
@@ -478,7 +648,6 @@ export default function Vouchers() {
     },
   });
 
-  // FIX: Added statusFilter to dependency array so it updates even if data is cached
   useEffect(() => {
     if (pageData && Array.isArray(pageData)) {
       if (offset === 0) {
@@ -489,7 +658,6 @@ export default function Vouchers() {
     }
   }, [pageData, offset, statusFilter]);
 
-  // FIX: Removed setPages([]) to prevent race condition clearing data
   useEffect(() => {
     setOffset(0);
   }, [statusFilter]);
@@ -501,6 +669,11 @@ export default function Vouchers() {
     setDetailOpen(true);
   };
 
+  const handleViewAttachment = (attachment: any) => {
+    setAttachmentToView(attachment);
+    setIsAttachmentViewerOpen(true);
+  };
+
   const filteredVouchers = vouchers?.filter((v: VoucherWithRelations) => {
     const matchesSearch =
       v.payee.toLowerCase().includes(search.toLowerCase()) ||
@@ -510,7 +683,6 @@ export default function Vouchers() {
       ) ||
       false;
 
-    // Note: The API already filters by status, but we keep this for consistency with search
     const matchesStatus = statusFilter === "all" || v.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
@@ -524,13 +696,10 @@ export default function Vouchers() {
       "Payee",
       "Description",
       "Amount",
-      "Invoice #",
-      "Net of VAT",
       "VAT",
       "Withheld",
       "Status",
-      "Requested By",
-      "Approved By",
+      "Approver",
     ];
 
     const rows = filteredVouchers.map((v: VoucherWithRelations) => [
@@ -539,8 +708,6 @@ export default function Vouchers() {
       v.payee,
       v.items?.map((item) => item.description).join("; ") || "",
       v.totalAmount,
-      v.items?.map((item) => item.invoiceNumber || "").join("; ") || "",
-      "", // Net of VAT - not used in new structure
       v.items
         ?.reduce((sum, item) => sum + parseFloat(item.vatAmount || "0"), 0)
         .toString() || "",
@@ -548,7 +715,6 @@ export default function Vouchers() {
         ?.reduce((sum, item) => sum + parseFloat(item.amountWithheld || "0"), 0)
         .toString() || "",
       v.status,
-      v.requester ? `${v.requester.firstName} ${v.requester.lastName}` : "",
       v.approver ? `${v.approver.firstName} ${v.approver.lastName}` : "",
     ]);
 
@@ -647,7 +813,6 @@ export default function Vouchers() {
               </Button>
             </div>
           ) : isLoading && pages.length === 0 ? (
-            // Show skeleton only if we have no data at all yet
             <div className="space-y-4">
               {[1, 2, 3, 4, 5].map((i) => (
                 <Skeleton key={i} className="h-16 w-full" />
@@ -661,7 +826,6 @@ export default function Vouchers() {
                 const atBottom =
                   el.scrollHeight - el.scrollTop <= el.clientHeight + 100;
                 if (atBottom && !isFetching) {
-                  // load next page if last page had full results
                   const lastPage = pages[pages.length - 1];
                   if (lastPage && lastPage.length === limit) {
                     setOffset((o) => o + limit);
@@ -678,9 +842,9 @@ export default function Vouchers() {
                       <TableHead className="w-[100px]">Date</TableHead>
                       <TableHead>Payee</TableHead>
                       <TableHead>Description</TableHead>
+                      <TableHead className="w-[100px]">Attachments</TableHead>
                       <TableHead className="text-right">Total Amount</TableHead>
                       <TableHead className="w-[100px]">Status</TableHead>
-                      <TableHead className="w-[120px]">Requested By</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -703,6 +867,12 @@ export default function Vouchers() {
                         <TableCell className="text-muted-foreground max-w-[200px] truncate">
                           {voucher.items?.[0]?.description || ""}
                         </TableCell>
+                        <TableCell className="text-sm">
+                          {voucher.attachmentCount &&
+                          voucher.attachmentCount > 0
+                            ? voucher.attachmentCount
+                            : "None"}
+                        </TableCell>
                         <TableCell className="text-right font-mono">
                           {formatCurrency(voucher.totalAmount)}
                         </TableCell>
@@ -711,11 +881,6 @@ export default function Vouchers() {
                             {getStatusIcon(voucher.status)}
                             <span className="ml-1">{voucher.status}</span>
                           </Badge>
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {voucher.requester
-                            ? `${voucher.requester.firstName} ${voucher.requester.lastName}`
-                            : "-"}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -747,6 +912,13 @@ export default function Vouchers() {
         voucher={selectedVoucher}
         open={detailOpen}
         onOpenChange={setDetailOpen}
+        onViewAttachment={handleViewAttachment}
+      />
+
+      <AttachmentViewerDialog
+        attachment={attachmentToView}
+        open={isAttachmentViewerOpen}
+        onOpenChange={setIsAttachmentViewerOpen}
       />
     </div>
   );

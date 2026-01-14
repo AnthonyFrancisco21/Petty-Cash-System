@@ -38,6 +38,7 @@ import AuditLog from "@/pages/audit-log";
 import Budgets from "@/pages/budgets";
 import Reports from "@/pages/reports";
 import ChartOfAccounts from "@/pages/chart-of-accounts";
+import PettyCashFundPage from "@/pages/petty-cash-fund";
 import {
   hasAdminAccess,
   canManageUsers,
@@ -59,10 +60,10 @@ function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <SidebarProvider style={sidebarStyle as React.CSSProperties}>
-      <div className="flex h-screen w-full">
+      <div className="flex h-screen w-full overflow-hidden">
         <AppSidebar />
-        <div className="flex flex-col flex-1 overflow-hidden">
-          <header className="flex items-center justify-between gap-4 p-3 border-b bg-background">
+        <div className="flex flex-col flex-1 h-screen overflow-hidden">
+          <header className="flex items-center justify-between gap-4 p-3 border-b bg-background flex-shrink-0">
             <SidebarTrigger data-testid="button-sidebar-toggle" />
             <div className="flex items-center gap-2">
               <ThemeToggle />
@@ -126,7 +127,7 @@ function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
               </AlertDialog>
             </div>
           </header>
-          <main className="flex-1 overflow-auto p-6 md:p-8">{children}</main>
+          <main className="flex-1 overflow-y-auto p-6 md:p-8">{children}</main>
         </div>
       </div>
     </SidebarProvider>
@@ -183,6 +184,9 @@ function Router() {
 
         {/* Approver Routes */}
         {isApprover && <Route path="/approvals" component={Approvals} />}
+        {isApprover && (
+          <Route path="/petty-cash-fund" component={PettyCashFundPage} />
+        )}
         {isApprover && <Route path="/audit-log" component={AuditLog} />}
 
         {/* Admin Routes */}

@@ -94,7 +94,6 @@ export const voucherItems = pgTable("voucher_items", {
   chartOfAccountId: integer("chart_of_account_id").references(
     () => chartOfAccounts.id
   ),
-  invoiceNumber: varchar("invoice_number", { length: 100 }),
   vatAmount: decimal("vat_amount", { precision: 15, scale: 2 }),
   amountWithheld: decimal("amount_withheld", { precision: 15, scale: 2 }),
   createdAt: timestamp("created_at").defaultNow(),
@@ -234,21 +233,15 @@ export const insertChartOfAccountSchema = createInsertSchema(
   description: true,
 });
 
-export const insertVoucherSchema = createInsertSchema(vouchers).pick({
-  date: true,
-  payee: true,
-  totalAmount: true,
-  requestedById: true,
-  approvedById: true,
-  status: true,
-  supportingDocsSubmitted: true,
+export const insertVoucherSchema = createInsertSchema(vouchers).omit({
+  createdAt: true,
+  updatedAt: true,
 });
 
 export const insertVoucherItemSchema = createInsertSchema(voucherItems).pick({
   description: true,
   amount: true,
   chartOfAccountId: true,
-  invoiceNumber: true,
   vatAmount: true,
   amountWithheld: true,
 });
@@ -264,17 +257,23 @@ export const insertPettyCashFundSchema = createInsertSchema(pettyCashFund).pick(
 
 export const insertReplenishmentRequestSchema = createInsertSchema(
   replenishmentRequests
-).pick({
-  requestDate: true,
-  totalAmount: true,
-  totalVat: true,
-  totalWithheld: true,
-  totalNetAmount: true,
-  status: true,
-  requestedById: true,
-  approvedById: true,
-  voucherIds: true,
-});
+)
+  .pick({
+    requestDate: true,
+    totalAmount: true,
+    totalVat: true,
+    totalWithheld: true,
+    totalNetAmount: true,
+    status: true,
+    requestedById: true,
+    approvedById: true,
+    voucherIds: true,
+  })
+  .extend({
+    voucherIds: z
+      .array(z.number().int())
+      .min(1, "At least one voucher must be selected"),
+  });
 
 export const insertAuditLogSchema = createInsertSchema(auditLogs).pick({
   entityType: true,
@@ -339,6 +338,7 @@ export type VoucherWithRelations = Voucher & {
   requester?: User | null;
   approver?: User | null;
   items?: (VoucherItem & { chartOfAccount?: ChartOfAccount | null })[];
+  attachmentCount?: number;
 };
 
 export type AuditLogWithUser = AuditLog & {

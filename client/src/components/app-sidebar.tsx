@@ -45,8 +45,12 @@ const cashManagerNavItems = [
   { title: "Reports", url: "/reports", icon: BarChart3 },
 ];
 
-const approverNavItems = [
+const approvalNavItems = [
   { title: "Pending Approvals", url: "/approvals", icon: CheckCircle2 },
+];
+
+const monitoringNavItems = [
+  { title: "Petty Cash Fund", url: "/petty-cash-fund", icon: Wallet },
   { title: "Audit Log", url: "/audit-log", icon: History },
 ];
 
@@ -162,26 +166,55 @@ export function AppSidebar() {
 
         {/* Approver Navigation */}
         {isApprover && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Approval Tasks</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {approverNavItems.map((item) => (
-                  <SidebarMenuItem key={item.title}>
-                    <SidebarMenuButton asChild isActive={location === item.url}>
-                      <Link
-                        href={item.url}
-                        data-testid={`link-nav-${item.title.toLowerCase()}`}
+          <>
+            <SidebarGroup>
+              <SidebarGroupLabel>Approval Tasks</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {approvalNavItems.map((item) => (
+                    <SidebarMenuItem key={item.title}>
+                      <SidebarMenuButton
+                        asChild
+                        isActive={location === item.url}
                       >
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
-                      </Link>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+                        <Link
+                          href={item.url}
+                          data-testid={`link-nav-${item.title.toLowerCase()}`}
+                        >
+                          <item.icon className="h-4 w-4" />
+                          <span>{item.title}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+
+            <SidebarGroup>
+              <SidebarGroupLabel>Monitoring</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {monitoringNavItems.map((item) => (
+                    <SidebarMenuItem key={item.title}>
+                      <SidebarMenuButton
+                        asChild
+                        isActive={location === item.url}
+                      >
+                        <Link
+                          href={item.url}
+                          data-testid={`link-nav-${item.title.toLowerCase()}`}
+                        >
+                          <item.icon className="h-4 w-4" />
+                          <span>{item.title}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </>
         )}
 
         {/* Admin Navigation */}
@@ -208,8 +241,8 @@ export function AppSidebar() {
           </SidebarGroup>
         )}
 
-        {/* Fund Status - Only for Preparer */}
-        {isPreparer && fund && (
+        {/* Fund Status - Only for Preparer and Approver */}
+        {(isPreparer || isApprover) && fund && (
           <SidebarGroup className="mt-auto">
             <SidebarGroupLabel>Fund Status</SidebarGroupLabel>
             <SidebarGroupContent className="px-2">

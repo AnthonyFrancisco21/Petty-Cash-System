@@ -53,12 +53,16 @@ export default function AuditLog() {
   const [search, setSearch] = useState("");
   const [entityFilter, setEntityFilter] = useState("all");
 
-  const { data: logs, isLoading, refetch } = useQuery<AuditLogEntry[]>({
+  const {
+    data: logsData,
+    isLoading,
+    refetch,
+  } = useQuery<{ logs: AuditLogEntry[]; total: number }>({
     queryKey: ["/api/audit-logs"],
   });
 
   useEffect(() => {
-    if (logs === undefined && !isLoading) {
+    if (logsData === undefined && !isLoading) {
       toast({
         title: "Unauthorized",
         description: "You don't have permission to view audit logs.",
@@ -66,14 +70,15 @@ export default function AuditLog() {
       });
       setTimeout(() => setLocation("/"), 500);
     }
-  }, [logs, isLoading, toast, setLocation]);
+  }, [logsData, isLoading, toast, setLocation]);
 
-  const filteredLogs = logs?.filter((log) => {
+  const filteredLogs = logsData?.logs?.filter((log: AuditLogEntry) => {
     const matchesSearch =
       log.description?.toLowerCase().includes(search.toLowerCase()) ||
       log.entityId.toLowerCase().includes(search.toLowerCase()) ||
       log.action.toLowerCase().includes(search.toLowerCase());
-    const matchesEntity = entityFilter === "all" || log.entityType === entityFilter;
+    const matchesEntity =
+      entityFilter === "all" || log.entityType === entityFilter;
     return matchesSearch && matchesEntity;
   });
 
@@ -116,7 +121,14 @@ export default function AuditLog() {
   const exportToCSV = () => {
     if (!filteredLogs?.length) return;
 
-    const headers = ["Timestamp", "User", "Entity Type", "Entity ID", "Action", "Description"];
+    const headers = [
+      "Timestamp",
+      "User",
+      "Entity Type",
+      "Entity ID",
+      "Action",
+      "Description",
+    ];
     const rows = filteredLogs.map((log) => [
       format(new Date(log.timestamp), "yyyy-MM-dd HH:mm:ss"),
       log.user ? `${log.user.firstName} ${log.user.lastName}` : "System",
@@ -185,7 +197,7 @@ export default function AuditLog() {
         <CardHeader>
           <CardTitle className="text-lg">Activity Log</CardTitle>
           <CardDescription>
-            {filteredLogs?.length || 0} entries found
+            {logsData?.total || 0} entries found
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -201,7 +213,10 @@ export default function AuditLog() {
               />
             </div>
             <Select value={entityFilter} onValueChange={setEntityFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-entity-filter">
+              <SelectTrigger
+                className="w-[180px]"
+                data-testid="select-entity-filter"
+              >
                 <Filter className="h-4 w-4 mr-2" />
                 <SelectValue placeholder="Filter by type" />
               </SelectTrigger>
@@ -216,7 +231,7 @@ export default function AuditLog() {
             </Select>
           </div>
 
-          <div className="rounded-md border overflow-hidden">
+          <div className="rounded-md border overflow-auto max-h-[600px]">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -230,13 +245,19 @@ export default function AuditLog() {
               <TableBody>
                 {filteredLogs?.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                    <TableCell
+                      colSpan={5}
+                      className="text-center text-muted-foreground py-8"
+                    >
                       No audit log entries found
                     </TableCell>
                   </TableRow>
                 ) : (
                   filteredLogs?.map((log) => (
-                    <TableRow key={log.id} data-testid={`row-audit-log-${log.id}`}>
+                    <TableRow
+                      key={log.id}
+                      data-testid={`row-audit-log-${log.id}`}
+                    >
                       <TableCell className="font-mono text-sm">
                         {format(new Date(log.timestamp), "MMM dd, yyyy HH:mm")}
                       </TableCell>
@@ -246,7 +267,9 @@ export default function AuditLog() {
                             {log.user.firstName} {log.user.lastName}
                           </span>
                         ) : (
-                          <span className="text-muted-foreground text-sm">System</span>
+                          <span className="text-muted-foreground text-sm">
+                            System
+                          </span>
                         )}
                       </TableCell>
                       <TableCell>
@@ -254,16 +277,22 @@ export default function AuditLog() {
                           <div className="h-6 w-6 rounded bg-muted flex items-center justify-center text-xs font-medium">
                             {getEntityIcon(log.entityType)}
                           </div>
-                          <span className="text-sm capitalize">{log.entityType}</span>
+                          <span className="text-sm capitalize">
+                            {log.entityType}
+                          </span>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <Badge variant={getActionBadgeVariant(log.action)} className="capitalize">
+                        <Badge
+                          variant={getActionBadgeVariant(log.action)}
+                          className="capitalize"
+                        >
                           {log.action.replace(/_/g, " ")}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
-                        {log.description || `${log.action} ${log.entityType} #${log.entityId}`}
+                        {log.description ||
+                          `${log.action} ${log.entityType} #${log.entityId}`}
                       </TableCell>
                     </TableRow>
                   ))

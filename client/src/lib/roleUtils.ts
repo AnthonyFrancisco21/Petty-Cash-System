@@ -63,3 +63,8 @@ export function canManageUsers(role: UserRole | string): boolean {
 export function canViewAuditLogs(role: UserRole | string): boolean {
   return role === "admin" || role === "approver";
 }
+
+// Check if user can manage petty cash fund
+export function canManagePettyCashFund(role: UserRole | string): boolean {
+  return role === "approver" || role === "admin";
+}

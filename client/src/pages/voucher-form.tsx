@@ -49,6 +49,7 @@ import { useAuth } from "@/hooks/useAuth";
 import type { User, ChartOfAccount } from "@shared/schema";
 
 const voucherFormSchema = z.object({
+  voucherNumber: z.string().min(1, "Voucher number is required"),
   date: z.date({ required_error: "Date is required" }),
   payee: z.string().min(1, "Payee is required"),
   items: z
@@ -62,7 +63,6 @@ const voucherFormSchema = z.object({
             (val) => !isNaN(parseFloat(val)) && parseFloat(val) > 0,
             "Amount must be a positive number"
           ),
-        invoiceNumber: z.string().optional(),
         vatAmount: z.string().optional(),
         amountWithheld: z.string().optional(),
         chartOfAccountId: z.string().optional(),
@@ -146,16 +146,16 @@ export default function VoucherForm() {
   const form = useForm<VoucherFormValues>({
     resolver: zodResolver(voucherFormSchema),
     defaultValues: {
+      voucherNumber: "",
       date: new Date(),
       payee: "",
       items: [
         {
           description: "",
           amount: "",
-          invoiceNumber: "",
           vatAmount: "",
           amountWithheld: "",
-          chartOfAccountId: "",
+          chartOfAccountId: undefined,
         },
       ],
     },
@@ -169,12 +169,12 @@ export default function VoucherForm() {
   const createVoucher = useMutation({
     mutationFn: async (data: VoucherFormValues) => {
       const payload = {
+        voucherNumber: data.voucherNumber,
         date: data.date.toISOString(),
         payee: data.payee,
         items: data.items.map((item) => ({
           description: item.description,
           amount: item.amount,
-          invoiceNumber: item.invoiceNumber || null,
           vatAmount: item.vatAmount || null,
           amountWithheld: item.amountWithheld || null,
           chartOfAccountId: item.chartOfAccountId
@@ -273,7 +273,25 @@ export default function VoucherForm() {
                 Voucher Header
               </CardTitle>
             </CardHeader>
-            <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <FormField
+                control={form.control}
+                name="voucherNumber"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Voucher # *</FormLabel>
+                    <FormControl>
+                      <Input
+                        placeholder="Enter voucher number"
+                        {...field}
+                        data-testid="input-voucher-number"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
               <FormField
                 control={form.control}
                 name="date"
@@ -347,7 +365,6 @@ export default function VoucherForm() {
                     append({
                       description: "",
                       amount: "",
-                      invoiceNumber: "",
                       vatAmount: "",
                       amountWithheld: "",
                       chartOfAccountId: "",
@@ -415,23 +432,6 @@ export default function VoucherForm() {
                                 {...field}
                               />
                             </div>
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-
-                    <FormField
-                      control={form.control}
-                      name={`items.${index}.invoiceNumber`}
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Invoice #</FormLabel>
-                          <FormControl>
-                            <Input
-                              placeholder="Enter invoice number"
-                              {...field}
-                            />
                           </FormControl>
                           <FormMessage />
                         </FormItem>
@@ -546,14 +546,21 @@ export default function VoucherForm() {
                 <div className="text-center">
                   <Upload className="mx-auto h-12 w-12 text-gray-400" />
                   <div className="mt-4">
-                    <label htmlFor="file-upload" className="cursor-pointer">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="cursor-pointer"
+                      onClick={() =>
+                        document.getElementById("file-upload")?.click()
+                      }
+                    >
                       <span className="mt-2 block text-sm font-medium text-gray-900">
                         Upload files
                       </span>
                       <span className="mt-1 block text-xs text-gray-500">
                         PDF, PNG, JPG up to 10MB each
                       </span>
-                    </label>
+                    </Button>
                     <input
                       id="file-upload"
                       name="file-upload"
@@ -624,7 +631,7 @@ export default function VoucherForm() {
             </CardContent>
           </Card>
 
-          <div className="flex items-center justify-end gap-4">
+          <div className="flex items-center justify-end gap-4 pb-6">
             <Button
               type="button"
               variant="outline"
