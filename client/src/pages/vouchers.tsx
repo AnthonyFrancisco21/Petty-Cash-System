@@ -46,7 +46,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { format } from "date-fns";
-import * as XLSX from "xlsx";
+import XLSX from "xlsx-js-style";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { isUnauthorizedError } from "@/lib/authUtils";
@@ -101,7 +101,7 @@ function VoucherDetailDialog({
   open,
   onOpenChange,
   onViewAttachment,
-}: VoucherDetailDialogProps) {
+}: VoucherDetailDialogProps): JSX.Element | null {
   const { toast } = useToast();
   const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -214,78 +214,415 @@ function VoucherDetailDialog({
   const handleExportExcel = () => {
     if (!voucher) return;
 
-    const workbook = XLSX.utils.book_new();
+    // ========================================
+    // 1. STYLE DEFINITIONS
+    // ========================================
 
-    // Sheet 1: Voucher Details
-    const voucherData = [
-      ["Petty Cash Voucher"],
-      [],
-      ["Voucher Number", voucher.voucherNumber],
-      ["Payee", voucher.payee],
-      ["Date", format(new Date(voucher.date), "MMMM d, yyyy")],
-      ["Total Amount", formatCurrency(voucher.totalAmount)],
-      ["Status", voucher.status],
-      [],
-      ["Items"],
-      ["Description", "Amount", "VAT", "Withheld", "Chart of Account"],
-    ];
+    const thinBorder = { style: "thin", color: { rgb: "000000" } };
+    const borderAll = {
+      top: thinBorder,
+      bottom: thinBorder,
+      left: thinBorder,
+      right: thinBorder,
+    };
 
-    voucher.items?.forEach((item) => {
-      voucherData.push([
-        item.description,
-        formatCurrency(item.amount),
-        item.vatAmount ? formatCurrency(item.vatAmount) : "",
-        item.amountWithheld ? formatCurrency(item.amountWithheld) : "",
-        item.chartOfAccount
-          ? `${item.chartOfAccount.code} - ${item.chartOfAccount.name}`
-          : "",
-      ]);
+    // Standard cell with borders
+    const sNormal = {
+      font: { name: "Calibri", sz: 11 },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "left", wrapText: true },
+    };
+
+    // Header cell (grey background, bold, centered)
+    const sHeader = {
+      font: { name: "Calibri", sz: 11, bold: true },
+      fill: { fgColor: { rgb: "D9D9D9" } },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "center", wrapText: true },
+    };
+
+    // Green header cell (for MPI section)
+    const sHeaderGreen = {
+      font: { name: "Calibri", sz: 11, bold: true },
+      fill: { fgColor: { rgb: "92D050" } }, // Green background
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "center", wrapText: true },
+    };
+
+    // Bold text cell
+    const sBold = {
+      font: { name: "Calibri", sz: 11, bold: true },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "left", wrapText: true },
+    };
+
+    // Center-aligned cell
+    const sCenter = {
+      font: { name: "Calibri", sz: 11 },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "center", wrapText: true },
+    };
+
+    // Right-aligned cell (for numbers/money)
+    const sRight = {
+      font: { name: "Calibri", sz: 11 },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "right", wrapText: true },
+    };
+
+    // Bold right-aligned cell
+    const sRightBold = {
+      font: { name: "Calibri", sz: 11, bold: true },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "right", wrapText: true },
+    };
+
+    // Helper function to create cell objects
+    // v = value, s = style
+    const c = (v: any, s = sNormal) => ({
+      v: v !== undefined && v !== null ? v : "",
+      s,
     });
 
-    voucherData.push([]);
-    voucherData.push([
-      "Requested By",
-      voucher.requester
-        ? `${voucher.requester.firstName} ${voucher.requester.lastName}`
-        : "",
-    ]);
-    voucherData.push([
-      "Approved By",
-      voucher.approver
-        ? `${voucher.approver.firstName} ${voucher.approver.lastName}`
-        : "",
-    ]);
+    // ========================================
+    // 2. DATA PREPARATION & CALCULATIONS
+    // ========================================
 
-    const voucherSheet = XLSX.utils.aoa_to_sheet(voucherData);
-    XLSX.utils.book_append_sheet(workbook, voucherSheet, "Voucher Details");
+    // Combine all item descriptions
+    const allParticulars =
+      voucher.items?.map((i) => i.description).join(", ") || "";
 
-    // Sheet 2: Attachments
-    if (attachments && attachments.length > 0) {
-      const attachmentData = [
-        ["Attachments"],
-        [],
-        ["File Name", "Uploaded At"],
-      ];
+    // Calculate totals from voucher items
+    let totalVat = 0;
+    let totalEwt = 0;
+    let totalExpense = 0;
+    let vatableAmount = 0;
+    let nonVatAmount = 0;
 
-      attachments.forEach((attachment) => {
-        attachmentData.push([
-          attachment.fileName,
-          format(new Date(attachment.uploadedAt), "MMMM d, yyyy h:mm a"),
-        ]);
-      });
+    voucher.items?.forEach((item) => {
+      const itemAmount = parseFloat(String(item.amount || 0));
+      const itemVat = parseFloat(String(item.vatAmount || 0));
+      const itemEwt = parseFloat(String(item.amountWithheld || 0));
 
-      const attachmentSheet = XLSX.utils.aoa_to_sheet(attachmentData);
-      XLSX.utils.book_append_sheet(workbook, attachmentSheet, "Attachments");
-    }
+      totalVat += itemVat;
+      totalEwt += itemEwt;
+      totalExpense += itemAmount;
 
-    // Generate and download the file
-    const fileName = `voucher-${voucher.voucherNumber}-${format(
-      new Date(),
-      "yyyy-MM-dd"
-    )}.xlsx`;
+      // Determine if vatable or non-vat
+      if (itemVat > 0) {
+        vatableAmount += itemAmount;
+      } else {
+        nonVatAmount += itemAmount;
+      }
+    });
+
+    const grandTotal = parseFloat(String(voucher.totalAmount || 0));
+
+    // Format helper functions
+    const fmtDate = (d: any) => (d ? format(new Date(d), "MM/dd/yyyy") : "");
+    const fmtMoney = (m: any) => (m ? Number(m).toFixed(2) : "0.00");
+
+    // Get user names
+    const requester = voucher.requester
+      ? `${voucher.requester.firstName} ${voucher.requester.lastName}`
+      : "";
+    const approver = voucher.approver
+      ? `${voucher.approver.firstName} ${voucher.approver.lastName}`
+      : "";
+
+    // ========================================
+    // 3. BUILD EXCEL GRID (ROW BY ROW)
+    // ========================================
+
+    const wsData = [
+      // ROW 0: Empty row for top spacing
+      [],
+
+      // ROW 1: Top header row (Bank, Voucher No., MPI, Prepd, Apprvd)
+      [
+        c("", sNormal), // A1 (empty for border)
+        c("Bank", sHeader), // B1
+        c("Voucher No.", sHeader), // C1
+        c("M P I", sHeaderGreen), // D1 (will merge with E1)
+        c("", sHeaderGreen), // E1 (merge placeholder)
+        c("Prepd", sHeader), // F1
+        c("Apprvd", sHeader), // G1
+      ],
+
+      // ROW 2: Top data row (B-1, Voucher Number, MPI data, Preparer, Approver)
+      [
+        c("", sNormal), // A2 (empty for border)
+        c("B-1", sCenter), // B2 - Bank code
+        c(voucher.voucherNumber, sCenter), // C2 - Voucher number from system
+        c("", sNormal), // D2 (merged MPI cell - empty)
+        c("", sNormal), // E2 (merged MPI cell - empty)
+        c(requester, sCenter), // F2 - Prepared by (from system)
+        c(approver, sCenter), // G2 - Approved by (from system)
+      ],
+
+      // ROW 3: Main voucher headers
+      [
+        c("", sNormal), // A3 (empty for border)
+        c("Date", sHeader), // B3
+        c("Check No.", sHeader), // C3
+        c("Payee", sHeader), // D3
+        c("Particulars", sHeader), // E3
+        c("Doc Ref", sHeader), // F3
+        c("Ammount", sHeader), // G3 (keeping typo from image)
+      ],
+
+      // ROW 4: Main voucher data
+      [
+        c("", sNormal), // A4 (empty for border)
+        c(fmtDate(voucher.date), sCenter), // B4 - Date from voucher
+        c("", sNormal), // C4 - Check number (empty for now)
+        c(voucher.payee, sNormal), // D4 - Payee from system
+        c(allParticulars, sNormal), // E4 - Combined particulars
+        c("", sNormal), // F4 - Document reference (empty)
+        c(fmtMoney(grandTotal), sRightBold), // G4 - Total amount
+      ],
+
+      // ROW 5: Empty data row (reduced spacing)
+      [
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+      ],
+
+      // ROW 6: Empty data row (reduced spacing)
+      [
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+      ],
+
+      // ROW 7: Accounting section header - MOVED UP FROM ROW 10
+      [
+        c("", sNormal), // A7 (empty for border)
+        c("Tr Type", sHeader), // B7 - Transaction type header
+        c("", sNormal), // C7
+        c("", sNormal), // D7
+        c("", sNormal), // E7
+        c("Debit", sHeader), // F7 - Debit header
+        c("Credit", sHeader), // G7 - Credit header
+      ],
+
+      // ROW 8: Check transaction - ASSETS / Cash (Credit side)
+      [
+        c("", sNormal), // A8 (empty for border)
+        c("[ ] Check", sNormal), // B8 - Transaction type: Check
+        c("", sNormal), // C8
+        c("ASSETS", sBold), // D8 - Account category
+        c("Cash", sNormal), // E8 - Account name
+        c("", sNormal), // F8 - Debit (empty)
+        c(fmtMoney(grandTotal), sRight), // G8 - Credit: Total amount
+      ],
+
+      // ROW 9: PCash transaction - VAT-INPUT (Debit side)
+      [
+        c("", sNormal), // A9 (empty for border)
+        c("[ ] PCash", sNormal), // B9 - Transaction type: Petty Cash
+        c("", sNormal), // C9
+        c("", sNormal), // D9
+        c("VAT-INPUT", sNormal), // E9 - VAT input account
+        c(fmtMoney(totalVat), sRight), // F9 - Debit: VAT amount
+        c("", sNormal), // G9 - Credit (empty)
+      ],
+
+      // ROW 10: DM transaction - LIABILITIES / EWT (Credit side)
+      [
+        c("", sNormal), // A10 (empty for border)
+        c("[ ] DM", sNormal), // B10 - Transaction type: Debit Memo
+        c("", sNormal), // C10
+        c("LIABILITIES", sBold), // D10 - Account category
+        c("EWT", sNormal), // E10 - Expanded Withholding Tax
+        c("", sNormal), // F10 - Debit (empty)
+        c(fmtMoney(totalEwt), sRight), // G10 - Credit: EWT amount
+      ],
+
+      // ROW 11: MC transaction - Breakdown header
+      [
+        c("", sNormal), // A11 (empty for border)
+        c("[ ] MC", sNormal), // B11 - Transaction type: Manual Check
+        c("Breakdown", sBold), // C11 - Breakdown section label
+        c("", sNormal), // D11
+        c("", sNormal), // E11
+        c("", sNormal), // F11
+        c("", sNormal), // G11
+      ],
+
+      // ROW 12: Breakdown column headers
+      [
+        c("", sNormal), // A12 (empty for border)
+        c("", sNormal), // B12
+        c("Vetable", sNormal), // C12 - Vatable column (keeping typo)
+        c("Non-VAT", sNormal), // D12 - Non-VAT column
+        c("Total", sNormal), // E12 - Total column
+        c("", sNormal), // F12
+        c("", sNormal), // G12
+      ],
+
+      // ROW 13: Cost/WIP section header - MOVED TO COLUMN B
+      [
+        c("", sNormal), // A13 (empty for border)
+        c("Cost/WIP", sBold), // B13 - Cost/Work in Progress header (MOVED FROM C)
+        c("", sNormal), // C13
+        c("", sNormal), // D13
+        c("", sNormal), // E13
+        c("", sNormal), // F13
+        c("", sNormal), // G13
+      ],
+
+      // ROW 14: Outside svcs (Services expense line) - MOVED TO COLUMN B
+      [
+        c("", sNormal), // A14 (empty for border)
+        c("Outside svcs", sNormal), // B14 - Outside services label (MOVED FROM C)
+        c("", sNormal), // C14
+        c("", sNormal), // D14
+        c("", sNormal), // E14
+        c("", sNormal), // F14
+        c("", sNormal), // G14
+      ],
+
+      // ROW 15: Subtotal Cost row with total - MOVED TO COLUMN B
+      [
+        c("", sNormal), // A15 (empty for border)
+        c("Subt Cost", sNormal), // B15 - Subtotal Cost label (MOVED FROM C)
+        c("", sNormal), // C15
+        c("", sNormal), // D15
+        c("0", sRight), // E15 - Total (0 in example)
+        c("", sNormal), // F15
+        c("", sNormal), // G15
+      ],
+
+      // ROW 16: Empty row
+      [
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+      ],
+
+      // ROW 17: Exp/WIP section header - MOVED TO COLUMN B
+      [
+        c("", sNormal), // A17 (empty for border)
+        c("Exp/WIP", sBold), // B17 - Expense/WIP header (MOVED FROM C)
+        c("", sNormal), // C17
+        c("", sNormal), // D17
+        c("", sNormal), // E17
+        c("", sNormal), // F17
+        c("", sNormal), // G17
+      ],
+
+      // ROW 18: Empty expense row
+      [
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+      ],
+
+      // ROW 19: Subtotal Cost for Exp/WIP - MOVED TO COLUMN B
+      [
+        c("", sNormal), // A19 (empty for border)
+        c("Subt Cost", sNormal), // B19 - Subtotal Cost (MOVED FROM C)
+        c("", sNormal), // C19
+        c("", sNormal), // D19
+        c("", sNormal), // E19
+        c("", sNormal), // F19
+        c("", sNormal), // G19
+      ],
+
+      // ROW 20: TOTAL row with final debit/credit totals - MOVED TO COLUMN B
+      [
+        c("", sNormal), // A20 (empty for border)
+        c("TOTAL", sHeader), // B20 - Total label (bold header) (MOVED FROM C)
+        c("", sNormal), // C20
+        c("", sNormal), // D20
+        c("", sNormal), // E20
+        c(fmtMoney(totalVat + totalExpense), sRightBold), // F20 - Total Debit
+        c(fmtMoney(grandTotal + totalEwt), sRightBold), // G20 - Total Credit
+      ],
+    ];
+
+    // ========================================
+    // 4. CREATE WORKBOOK & WORKSHEET
+    // ========================================
+
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet(wsData);
+
+    // ========================================
+    // 5. CONFIGURE MERGES, COLUMN WIDTHS, ROW HEIGHTS
+    // ========================================
+
+    // A. Cell Merges (s=start, e=end, r=row, c=column, 0-indexed)
+    sheet["!merges"] = [
+      { s: { r: 1, c: 3 }, e: { r: 1, c: 4 } }, // Row 1: Merge D1:E1 for "M P I" header
+      { s: { r: 2, c: 3 }, e: { r: 2, c: 4 } }, // Row 2: Merge D2:E2 for MPI data
+    ];
+
+    // B. Column Widths (wch = width in characters)
+    // Adjust these values if columns appear too narrow/wide
+    sheet["!cols"] = [
+      { wch: 3 }, // A: Empty border column (narrow)
+      { wch: 12 }, // B: Date / Tr Type / Bank / Cost/WIP labels
+      { wch: 15 }, // C: Check No / Voucher No / Breakdown
+      { wch: 20 }, // D: Payee / Account Categories / MPI
+      { wch: 35 }, // E: Particulars / Account Names
+      { wch: 15 }, // F: Doc Ref / Debit / Prepd
+      { wch: 15 }, // G: Amount / Credit / Apprvd
+    ];
+
+    // C. Row Heights (hpt = height in points)
+    // Adjust these if rows appear too short/tall
+    sheet["!rows"] = [
+      { hpt: 15 }, // Row 0: Top spacing
+      { hpt: 20 }, // Row 1: Top header
+      { hpt: 20 }, // Row 2: Top data
+      { hpt: 20 }, // Row 3: Main headers
+      { hpt: 40 }, // Row 4: Main data (taller for wrap text)
+      { hpt: 20 }, // Row 5: Reduced spacing
+      { hpt: 20 }, // Row 6: Reduced spacing
+      { hpt: 20 }, // Row 7: Accounting header (moved up)
+      { hpt: 20 }, // Row 8: Check
+      { hpt: 20 }, // Row 9: PCash
+      { hpt: 20 }, // Row 10: DM
+      { hpt: 20 }, // Row 11: MC
+      { hpt: 20 }, // Row 12: Breakdown headers
+      { hpt: 20 }, // Row 13: Cost/WIP
+      { hpt: 20 }, // Row 14: Outside svcs
+      { hpt: 20 }, // Row 15: Subt Cost
+      { hpt: 20 }, // Row 16: Empty
+      { hpt: 20 }, // Row 17: Exp/WIP
+      { hpt: 20 }, // Row 18: Empty
+      { hpt: 20 }, // Row 19: Subt Cost
+      { hpt: 20 }, // Row 20: TOTAL
+    ];
+
+    // ========================================
+    // 6. EXPORT THE FILE
+    // ========================================
+
+    XLSX.utils.book_append_sheet(workbook, sheet, "Voucher");
+
+    const fileName = `Voucher-${voucher.voucherNumber}.xlsx`;
     XLSX.writeFile(workbook, fileName);
   };
-
   if (!voucher) return null;
 
   return (
