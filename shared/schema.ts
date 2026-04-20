@@ -15,7 +15,7 @@ import { z } from "zod";
 
 // 1. Updated Users table with password field
 export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   username: text("username").notNull().unique(),
   password: text("password").notNull(), // Added password field
   firstName: text("first_name"),
@@ -45,7 +45,7 @@ export const chartOfAccountsRelations = relations(
   chartOfAccounts,
   ({ many }) => ({
     vouchers: many(vouchers),
-  })
+  }),
 );
 
 // Petty Cash Fund configuration
@@ -71,9 +71,13 @@ export type VoucherStatus = "pending" | "approved" | "rejected" | "replenished";
 // Petty Cash Vouchers (Header)
 export const vouchers = pgTable("vouchers", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  companyName: varchar("company_name", { length: 255 })
+    .notNull()
+    .default("M P I"), // FIXED: Moved to Voucher Header
   voucherNumber: varchar("voucher_number", { length: 50 }).notNull().unique(),
   date: timestamp("date").notNull(),
   payee: varchar("payee", { length: 255 }).notNull(),
+  category: text("category").notNull().default("Exp"), // FIXED: Added category (Cost vs Exp)
   totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).notNull(),
   requestedById: integer("requested_by_id").references(() => users.id),
   approvedById: integer("approved_by_id").references(() => users.id),
@@ -90,11 +94,15 @@ export const voucherItems = pgTable("voucher_items", {
     .notNull()
     .references(() => vouchers.id),
   description: text("description").notNull(),
+  category: varchar("category", { length: 20 }).notNull().default("Exp"), // FIXED: Added category (Cost vs Exp)
   amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
   chartOfAccountId: integer("chart_of_account_id").references(
-    () => chartOfAccounts.id
+    () => chartOfAccounts.id,
   ),
   vatAmount: decimal("vat_amount", { precision: 15, scale: 2 }),
+  nonVatAmount: decimal("non_vat_amount", { precision: 12, scale: 2 }).default(
+    "0",
+  ),
   amountWithheld: decimal("amount_withheld", { precision: 15, scale: 2 }),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -217,7 +225,7 @@ export const voucherAttachmentsRelations = relations(
       fields: [voucherAttachments.uploadedById],
       references: [users.id],
     }),
-  })
+  }),
 );
 
 // Insert schemas
@@ -226,7 +234,7 @@ export const insertUserSchema = createInsertSchema(users).omit({
 });
 
 export const insertChartOfAccountSchema = createInsertSchema(
-  chartOfAccounts
+  chartOfAccounts,
 ).pick({
   code: true,
   name: true,
@@ -238,8 +246,10 @@ export const insertVoucherSchema = createInsertSchema(vouchers).omit({
   updatedAt: true,
 });
 
+// FIXED: Ensure category is picked up when inserting items
 export const insertVoucherItemSchema = createInsertSchema(voucherItems).pick({
   description: true,
+  category: true,
   amount: true,
   chartOfAccountId: true,
   vatAmount: true,
@@ -252,11 +262,11 @@ export const insertPettyCashFundSchema = createInsertSchema(pettyCashFund).pick(
     currentBalance: true,
     managerId: true,
     lastReplenishmentDate: true,
-  }
+  },
 );
 
 export const insertReplenishmentRequestSchema = createInsertSchema(
-  replenishmentRequests
+  replenishmentRequests,
 )
   .pick({
     requestDate: true,
@@ -287,7 +297,7 @@ export const insertAuditLogSchema = createInsertSchema(auditLogs).pick({
 });
 
 export const insertAccountBudgetSchema = createInsertSchema(
-  accountBudgets
+  accountBudgets,
 ).pick({
   chartOfAccountId: true,
   budgetAmount: true,
@@ -298,7 +308,7 @@ export const insertAccountBudgetSchema = createInsertSchema(
 });
 
 export const insertVoucherAttachmentSchema = createInsertSchema(
-  voucherAttachments
+  voucherAttachments,
 ).pick({
   voucherId: true,
   fileName: true,

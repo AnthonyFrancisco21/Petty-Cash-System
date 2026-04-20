@@ -75,7 +75,7 @@ function getStatusIcon(status: string) {
 }
 
 function getStatusVariant(
-  status: string
+  status: string,
 ): "default" | "secondary" | "outline" | "destructive" {
   switch (status) {
     case "approved":
@@ -87,6 +87,15 @@ function getStatusVariant(
     default:
       return "outline";
   }
+}
+
+// ─── Determine the tax type label for display ───────────────
+function getTaxLabel(item: any): string {
+  const nonVat = parseFloat(String(item.nonVatAmount || "0"));
+  const vatBase = parseFloat(String(item.amount || "0"));
+  if (nonVat > 0 && vatBase > 0) return "Mixed";
+  if (vatBase > 0) return "Vatable";
+  return "Non-VAT";
 }
 
 interface VoucherDetailDialogProps {
@@ -137,9 +146,7 @@ function VoucherDetailDialog({
       queryClient.invalidateQueries({
         queryKey: [`/api/vouchers/${voucher?.id}/attachments`],
       });
-      queryClient.invalidateQueries({
-        queryKey: ["/api/vouchers"],
-      });
+      queryClient.invalidateQueries({ queryKey: ["/api/vouchers"] });
     },
     onError: (error: Error) => {
       if (isUnauthorizedError(error)) {
@@ -164,7 +171,7 @@ function VoucherDetailDialog({
       if (!voucher) throw new Error("No voucher selected");
       return await apiRequest(
         "DELETE",
-        `/api/vouchers/${voucher.id}/attachments/${attachmentId}`
+        `/api/vouchers/${voucher.id}/attachments/${attachmentId}`,
       );
     },
     onSuccess: () => {
@@ -175,9 +182,7 @@ function VoucherDetailDialog({
       queryClient.invalidateQueries({
         queryKey: [`/api/vouchers/${voucher?.id}/attachments`],
       });
-      queryClient.invalidateQueries({
-        queryKey: ["/api/vouchers"],
-      });
+      queryClient.invalidateQueries({ queryKey: ["/api/vouchers"] });
     },
     onError: (error: Error) => {
       if (isUnauthorizedError(error)) {
@@ -211,13 +216,32 @@ function VoucherDetailDialog({
       user.role === "preparer" ||
       (voucher && voucher.requestedById === user.id));
 
+  // ============================================================
+  // EXCEL EXPORT
+  // ============================================================
+  // Accounting logic (Philippine BIR context):
+  //
+  //   DEBIT:
+  //     • Expense / Cost / Asset account  = nonVatAmount + vatableBase (total base)
+  //     • Input VAT                        = vatAmount
+  //
+  //   CREDIT:
+  //     • Petty Cash (Cash)                = netCashOut (total base + vat − ewt)
+  //     • EWT Payable                      = amountWithheld
+  //
+  //   Balance check: Debits = Credits
+  //     (base + vat) = (base + vat − ewt) + ewt  ✓
+  //
+  //   Each item now carries:
+  //     item.nonVatAmount  → non-vatable portion base (new DB column)
+  //     item.amount        → vatable base (back-calculated from gross)
+  //     item.vatAmount     → input VAT extracted from vatable gross
+  //     item.amountWithheld → EWT withheld on totalBase
+  // ============================================================
   const handleExportExcel = () => {
     if (!voucher) return;
 
-    // ========================================
-    // 1. STYLE DEFINITIONS
-    // ========================================
-
+    // ── Style definitions ──
     const thinBorder = { style: "thin", color: { rgb: "000000" } };
     const borderAll = {
       top: thinBorder,
@@ -226,404 +250,315 @@ function VoucherDetailDialog({
       right: thinBorder,
     };
 
-    // Standard cell with borders
     const sNormal = {
       font: { name: "Calibri", sz: 11 },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "left", wrapText: true },
     };
-
-    // Header cell (grey background, bold, centered)
     const sHeader = {
       font: { name: "Calibri", sz: 11, bold: true },
       fill: { fgColor: { rgb: "D9D9D9" } },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "center", wrapText: true },
     };
-
-    // Green header cell (for MPI section)
     const sHeaderGreen = {
-      font: { name: "Calibri", sz: 11, bold: true },
-      fill: { fgColor: { rgb: "92D050" } }, // Green background
+      font: { name: "Calibri", sz: 14, bold: true },
+      fill: { fgColor: { rgb: "92D050" } },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "center", wrapText: true },
     };
-
-    // Bold text cell
     const sBold = {
       font: { name: "Calibri", sz: 11, bold: true },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "left", wrapText: true },
     };
-
-    // Center-aligned cell
     const sCenter = {
       font: { name: "Calibri", sz: 11 },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "center", wrapText: true },
     };
-
-    // Right-aligned cell (for numbers/money)
     const sRight = {
       font: { name: "Calibri", sz: 11 },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "right", wrapText: true },
     };
-
-    // Bold right-aligned cell
+    const sRightRed = {
+      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FF0000" } },
+      border: borderAll,
+      alignment: { vertical: "center", horizontal: "right", wrapText: true },
+    };
     const sRightBold = {
       font: { name: "Calibri", sz: 11, bold: true },
       border: borderAll,
       alignment: { vertical: "center", horizontal: "right", wrapText: true },
     };
 
-    // Helper function to create cell objects
-    // v = value, s = style
     const c = (v: any, s = sNormal) => ({
       v: v !== undefined && v !== null ? v : "",
       s,
     });
 
-    // ========================================
-    // 2. DATA PREPARATION & CALCULATIONS
-    // ========================================
-
-    // Combine all item descriptions
+    // ── Data preparation ──
+    const dynamicCompanyName = voucher.companyName || "M P I";
     const allParticulars =
-      voucher.items?.map((i) => i.description).join(", ") || "";
+      "petty cash c/o " +
+      (voucher.requester ? voucher.requester.firstName : "");
 
-    // Calculate totals from voucher items
+    // Voucher-level category (new field). Fall back to item-level if old data.
+    const voucherCategory =
+      (voucher as any).category ||
+      (voucher.items?.[0] as any)?.category ||
+      "Exp";
+
     let totalVat = 0;
     let totalEwt = 0;
-    let totalExpense = 0;
-    let vatableAmount = 0;
-    let nonVatAmount = 0;
 
-    voucher.items?.forEach((item) => {
-      const itemAmount = parseFloat(String(item.amount || 0));
-      const itemVat = parseFloat(String(item.vatAmount || 0));
-      const itemEwt = parseFloat(String(item.amountWithheld || 0));
+    // ── Map items: now each item has both a vatable base AND a non-vat amount ──
+    const mappedItems: {
+      description: string;
+      vatableBase: number; // item.amount (purely vatable base)
+      nonVatAmount: number; // item.nonVatAmount (new column)
+      vat: number;
+      ewt: number;
+    }[] = [];
+
+    voucher.items?.forEach((item: any) => {
+      const vatableBase = parseFloat(String(item.amount || "0"));
+      const nonVatAmt = parseFloat(String(item.nonVatAmount || "0"));
+      const itemVat = parseFloat(String(item.vatAmount || "0"));
+      const itemEwt = parseFloat(String(item.amountWithheld || "0"));
 
       totalVat += itemVat;
       totalEwt += itemEwt;
-      totalExpense += itemAmount;
 
-      // Determine if vatable or non-vat
-      if (itemVat > 0) {
-        vatableAmount += itemAmount;
-      } else {
-        nonVatAmount += itemAmount;
-      }
+      mappedItems.push({
+        description: item.description || "",
+        vatableBase,
+        nonVatAmount: nonVatAmt,
+        vat: itemVat,
+        ewt: itemEwt,
+      });
     });
 
-    const grandTotal = parseFloat(String(voucher.totalAmount || 0));
+    // Totals
+    const totalVatableBase = mappedItems.reduce((s, i) => s + i.vatableBase, 0);
+    const totalNonVatBase = mappedItems.reduce((s, i) => s + i.nonVatAmount, 0);
+    const totalBaseAmount = totalVatableBase + totalNonVatBase;
+    const netCashOut = totalBaseAmount + totalVat - totalEwt;
+    const totalDebits = totalBaseAmount + totalVat;
+    const totalCredits = netCashOut + totalEwt;
 
-    // Format helper functions
-    const fmtDate = (d: any) => (d ? format(new Date(d), "MM/dd/yyyy") : "");
-    const fmtMoney = (m: any) => (m ? Number(m).toFixed(2) : "0.00");
+    const fmtDate = (d: any) => (d ? format(new Date(d), "dd-MMM-yy") : "");
+    const fmtMoney = (m: number | string) =>
+      m ? Number(m).toFixed(2) : "0.00";
 
-    // Get user names
-    const requester = voucher.requester
-      ? `${voucher.requester.firstName} ${voucher.requester.lastName}`
-      : "";
-    const approver = voucher.approver
-      ? `${voucher.approver.firstName} ${voucher.approver.lastName}`
-      : "";
+    const requester = voucher.requester ? voucher.requester.firstName : "";
+    const approver = voucher.approver ? voucher.approver.firstName : "";
 
-    // ========================================
-    // 3. BUILD EXCEL GRID (ROW BY ROW)
-    // ========================================
+    // ── Category section label for Excel ──
+    const categoryLabels: Record<string, string> = {
+      Exp: "Exp",
+      Cost: "Cost",
+      Asset: "Asset",
+    };
+    const sectionLabel = categoryLabels[voucherCategory] ?? "Exp/WIP";
 
-    const wsData = [
-      // ROW 0: Empty row for top spacing
-      [],
-
-      // ROW 1: Top header row (Bank, Voucher No., MPI, Prepd, Apprvd)
+    // ── Build Excel grid ──
+    let wsData: any[] = [
+      // ROW 0
       [
-        c("", sNormal), // A1 (empty for border)
-        c("Bank", sHeader), // B1
-        c("Voucher No.", sHeader), // C1
-        c("M P I", sHeaderGreen), // D1 (will merge with E1)
-        c("", sHeaderGreen), // E1 (merge placeholder)
-        c("Prepd", sHeader), // F1
-        c("Apprvd", sHeader), // G1
+        c("Bank", sHeader),
+        c("Voucher No.", sHeader),
+        c(dynamicCompanyName, sHeaderGreen),
+        c("", sHeaderGreen),
+        c("Prepd", sHeader),
+        c("Apprvd", sHeader),
       ],
-
-      // ROW 2: Top data row (B-1, Voucher Number, MPI data, Preparer, Approver)
+      // ROW 1
       [
-        c("", sNormal), // A2 (empty for border)
-        c("B-1", sCenter), // B2 - Bank code
-        c(voucher.voucherNumber, sCenter), // C2 - Voucher number from system
-        c("", sNormal), // D2 (merged MPI cell - empty)
-        c("", sNormal), // E2 (merged MPI cell - empty)
-        c(requester, sCenter), // F2 - Prepared by (from system)
-        c(approver, sCenter), // G2 - Approved by (from system)
+        c("B-1", sCenter),
+        c(voucher.voucherNumber, sCenter),
+        c("", sNormal),
+        c("", sNormal),
+        c(requester, sCenter),
+        c(approver, sCenter),
       ],
-
-      // ROW 3: Main voucher headers
+      // ROW 2
       [
-        c("", sNormal), // A3 (empty for border)
-        c("Date", sHeader), // B3
-        c("Check No.", sHeader), // C3
-        c("Payee", sHeader), // D3
-        c("Particulars", sHeader), // E3
-        c("Doc Ref", sHeader), // F3
-        c("Ammount", sHeader), // G3 (keeping typo from image)
+        c("Date", sHeader),
+        c("Chk No", sHeader),
+        c("Payee", sHeader),
+        c("Particulars", sHeader),
+        c("Doc Ref", sHeader),
+        c("Amount", sHeader),
       ],
-
-      // ROW 4: Main voucher data
+      // ROW 3
       [
-        c("", sNormal), // A4 (empty for border)
-        c(fmtDate(voucher.date), sCenter), // B4 - Date from voucher
-        c("", sNormal), // C4 - Check number (empty for now)
-        c(voucher.payee, sNormal), // D4 - Payee from system
-        c(allParticulars, sNormal), // E4 - Combined particulars
-        c("", sNormal), // F4 - Document reference (empty)
-        c(fmtMoney(grandTotal), sRightBold), // G4 - Total amount
+        c(fmtDate(voucher.date), sCenter),
+        c("", sNormal),
+        c(voucher.payee, sCenter),
+        c(allParticulars, sCenter),
+        c("", sNormal),
+        c(fmtMoney(netCashOut), sRightRed),
       ],
-
-      // ROW 5: Empty data row (reduced spacing)
+      // ROW 4 — Accounting headers
       [
+        c("Tr Type", sHeader),
         c("", sNormal),
         c("", sNormal),
         c("", sNormal),
+        c("Debit", sHeader),
+        c("Credit", sHeader),
+      ],
+      // ROW 5 — Cash (credit)
+      [
+        c("[ ] Check", sNormal),
+        c("", sNormal),
+        c("ASSETS", sBold),
+        c("Cash", sNormal),
+        c("", sNormal),
+        c(fmtMoney(netCashOut), sRight),
+      ],
+      // ROW 6 — VAT Input (debit)
+      [
+        c("[X] Pcash", sNormal),
         c("", sNormal),
         c("", sNormal),
-        c("", sNormal),
+        c("VAT-input", sNormal),
+        c(fmtMoney(totalVat), sRight),
         c("", sNormal),
       ],
-
-      // ROW 6: Empty data row (reduced spacing)
+      // ROW 7 — EWT Payable (credit)
       [
+        c("[ ] DM", sNormal),
         c("", sNormal),
+        c("LIABILITIES", sBold),
+        c("EWT Payable", sNormal),
         c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
+        c(fmtMoney(totalEwt), sRight),
       ],
-
-      // ROW 7: Accounting section header - MOVED UP FROM ROW 10
+      // ROW 8 — Breakdown header
       [
-        c("", sNormal), // A7 (empty for border)
-        c("Tr Type", sHeader), // B7 - Transaction type header
-        c("", sNormal), // C7
-        c("", sNormal), // D7
-        c("", sNormal), // E7
-        c("Debit", sHeader), // F7 - Debit header
-        c("Credit", sHeader), // G7 - Credit header
-      ],
-
-      // ROW 8: Check transaction - ASSETS / Cash (Credit side)
-      [
-        c("", sNormal), // A8 (empty for border)
-        c("[ ] Check", sNormal), // B8 - Transaction type: Check
-        c("", sNormal), // C8
-        c("ASSETS", sBold), // D8 - Account category
-        c("Cash", sNormal), // E8 - Account name
-        c("", sNormal), // F8 - Debit (empty)
-        c(fmtMoney(grandTotal), sRight), // G8 - Credit: Total amount
-      ],
-
-      // ROW 9: PCash transaction - VAT-INPUT (Debit side)
-      [
-        c("", sNormal), // A9 (empty for border)
-        c("[ ] PCash", sNormal), // B9 - Transaction type: Petty Cash
-        c("", sNormal), // C9
-        c("", sNormal), // D9
-        c("VAT-INPUT", sNormal), // E9 - VAT input account
-        c(fmtMoney(totalVat), sRight), // F9 - Debit: VAT amount
-        c("", sNormal), // G9 - Credit (empty)
-      ],
-
-      // ROW 10: DM transaction - LIABILITIES / EWT (Credit side)
-      [
-        c("", sNormal), // A10 (empty for border)
-        c("[ ] DM", sNormal), // B10 - Transaction type: Debit Memo
-        c("", sNormal), // C10
-        c("LIABILITIES", sBold), // D10 - Account category
-        c("EWT", sNormal), // E10 - Expanded Withholding Tax
-        c("", sNormal), // F10 - Debit (empty)
-        c(fmtMoney(totalEwt), sRight), // G10 - Credit: EWT amount
-      ],
-
-      // ROW 11: MC transaction - Breakdown header
-      [
-        c("", sNormal), // A11 (empty for border)
-        c("[ ] MC", sNormal), // B11 - Transaction type: Manual Check
-        c("Breakdown", sBold), // C11 - Breakdown section label
-        c("", sNormal), // D11
-        c("", sNormal), // E11
-        c("", sNormal), // F11
-        c("", sNormal), // G11
-      ],
-
-      // ROW 12: Breakdown column headers
-      [
-        c("", sNormal), // A12 (empty for border)
-        c("", sNormal), // B12
-        c("Vetable", sNormal), // C12 - Vatable column (keeping typo)
-        c("Non-VAT", sNormal), // D12 - Non-VAT column
-        c("Total", sNormal), // E12 - Total column
-        c("", sNormal), // F12
-        c("", sNormal), // G12
-      ],
-
-      // ROW 13: Cost/WIP section header - MOVED TO COLUMN B
-      [
-        c("", sNormal), // A13 (empty for border)
-        c("Cost/WIP", sBold), // B13 - Cost/Work in Progress header (MOVED FROM C)
-        c("", sNormal), // C13
-        c("", sNormal), // D13
-        c("", sNormal), // E13
-        c("", sNormal), // F13
-        c("", sNormal), // G13
-      ],
-
-      // ROW 14: Outside svcs (Services expense line) - MOVED TO COLUMN B
-      [
-        c("", sNormal), // A14 (empty for border)
-        c("Outside svcs", sNormal), // B14 - Outside services label (MOVED FROM C)
-        c("", sNormal), // C14
-        c("", sNormal), // D14
-        c("", sNormal), // E14
-        c("", sNormal), // F14
-        c("", sNormal), // G14
-      ],
-
-      // ROW 15: Subtotal Cost row with total - MOVED TO COLUMN B
-      [
-        c("", sNormal), // A15 (empty for border)
-        c("Subt Cost", sNormal), // B15 - Subtotal Cost label (MOVED FROM C)
-        c("", sNormal), // C15
-        c("", sNormal), // D15
-        c("0", sRight), // E15 - Total (0 in example)
-        c("", sNormal), // F15
-        c("", sNormal), // G15
-      ],
-
-      // ROW 16: Empty row
-      [
-        c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
+        c("[ ] MC", sNormal),
+        c("Breakdown", sHeader),
         c("", sNormal),
         c("", sNormal),
         c("", sNormal),
         c("", sNormal),
       ],
-
-      // ROW 17: Exp/WIP section header - MOVED TO COLUMN B
-      [
-        c("", sNormal), // A17 (empty for border)
-        c("Exp/WIP", sBold), // B17 - Expense/WIP header (MOVED FROM C)
-        c("", sNormal), // C17
-        c("", sNormal), // D17
-        c("", sNormal), // E17
-        c("", sNormal), // F17
-        c("", sNormal), // G17
-      ],
-
-      // ROW 18: Empty expense row
+      // ROW 9 — Column labels
       [
         c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
-        c("", sNormal),
+        c("Vatable Base", sCenter),
+        c("Non-VAT", sCenter),
+        c("Total", sCenter),
         c("", sNormal),
         c("", sNormal),
       ],
-
-      // ROW 19: Subtotal Cost for Exp/WIP - MOVED TO COLUMN B
+      // ROW 10 — Category header (e.g. "Exp/WIP" or "Cost/WIP" or "Asset")
       [
-        c("", sNormal), // A19 (empty for border)
-        c("Subt Cost", sNormal), // B19 - Subtotal Cost (MOVED FROM C)
-        c("", sNormal), // C19
-        c("", sNormal), // D19
-        c("", sNormal), // E19
-        c("", sNormal), // F19
-        c("", sNormal), // G19
-      ],
-
-      // ROW 20: TOTAL row with final debit/credit totals - MOVED TO COLUMN B
-      [
-        c("", sNormal), // A20 (empty for border)
-        c("TOTAL", sHeader), // B20 - Total label (bold header) (MOVED FROM C)
-        c("", sNormal), // C20
-        c("", sNormal), // D20
-        c("", sNormal), // E20
-        c(fmtMoney(totalVat + totalExpense), sRightBold), // F20 - Total Debit
-        c(fmtMoney(grandTotal + totalEwt), sRightBold), // G20 - Total Credit
+        c(sectionLabel, sHeader),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
+        c("", sNormal),
       ],
     ];
 
-    // ========================================
-    // 4. CREATE WORKBOOK & WORKSHEET
-    // ========================================
+    // ── Line items under the category section ──
+    let subtotalVatable = 0;
+    let subtotalNonVat = 0;
 
+    if (mappedItems.length === 0) {
+      // Safety placeholder
+      wsData.push([
+        c("(no items)", sNormal),
+        c("-", sRight),
+        c("-", sRight),
+        c("-", sRight),
+        c("", sNormal),
+        c("", sNormal),
+      ]);
+    } else {
+      mappedItems.forEach((item) => {
+        subtotalVatable += item.vatableBase;
+        subtotalNonVat += item.nonVatAmount;
+        const rowTotal = item.vatableBase + item.nonVatAmount;
+        wsData.push([
+          c(item.description, sNormal),
+          c(item.vatableBase > 0 ? fmtMoney(item.vatableBase) : "-", sRight),
+          c(item.nonVatAmount > 0 ? fmtMoney(item.nonVatAmount) : "-", sRight),
+          c(rowTotal > 0 ? fmtMoney(rowTotal) : "-", sRight),
+          c("", sNormal),
+          c("", sNormal),
+        ]);
+      });
+    }
+
+    // Subtotal row
+    const subtotalRow = subtotalVatable + subtotalNonVat;
+    wsData.push([
+      c(`Subt ${sectionLabel}`, sBold),
+      c(subtotalVatable > 0 ? fmtMoney(subtotalVatable) : "-", sRight),
+      c(subtotalNonVat > 0 ? fmtMoney(subtotalNonVat) : "-", sRight),
+      c(fmtMoney(subtotalRow), sRight),
+      c(fmtMoney(subtotalRow), sRight), // Debit column (expense/asset debit)
+      c("", sNormal),
+    ]);
+
+    // TOTAL row
+    wsData.push([
+      c("TOTAL", sHeader),
+      c("", sNormal),
+      c("", sNormal),
+      c("", sNormal),
+      c(fmtMoney(totalDebits), sRightBold),
+      c(fmtMoney(totalCredits), sRightBold),
+    ]);
+
+    // ── Create workbook ──
     const workbook = XLSX.utils.book_new();
     const sheet = XLSX.utils.aoa_to_sheet(wsData);
 
-    // ========================================
-    // 5. CONFIGURE MERGES, COLUMN WIDTHS, ROW HEIGHTS
-    // ========================================
-
-    // A. Cell Merges (s=start, e=end, r=row, c=column, 0-indexed)
+    // Merges
     sheet["!merges"] = [
-      { s: { r: 1, c: 3 }, e: { r: 1, c: 4 } }, // Row 1: Merge D1:E1 for "M P I" header
-      { s: { r: 2, c: 3 }, e: { r: 2, c: 4 } }, // Row 2: Merge D2:E2 for MPI data
+      { s: { r: 0, c: 2 }, e: { r: 0, c: 3 } }, // Company name row 1
+      { s: { r: 1, c: 2 }, e: { r: 1, c: 3 } }, // Company name row 2
+      { s: { r: 4, c: 0 }, e: { r: 4, c: 1 } }, // Tr Type header
+      { s: { r: 8, c: 1 }, e: { r: 8, c: 3 } }, // Breakdown label
     ];
 
-    // B. Column Widths (wch = width in characters)
-    // Adjust these values if columns appear too narrow/wide
+    // Column widths
     sheet["!cols"] = [
-      { wch: 3 }, // A: Empty border column (narrow)
-      { wch: 12 }, // B: Date / Tr Type / Bank / Cost/WIP labels
-      { wch: 15 }, // C: Check No / Voucher No / Breakdown
-      { wch: 20 }, // D: Payee / Account Categories / MPI
-      { wch: 35 }, // E: Particulars / Account Names
-      { wch: 15 }, // F: Doc Ref / Debit / Prepd
-      { wch: 15 }, // G: Amount / Credit / Apprvd
+      { wch: 22 }, // A: Description / category label
+      { wch: 18 }, // B: Vatable column
+      { wch: 18 }, // C: Non-VAT column
+      { wch: 18 }, // D: Total column
+      { wch: 15 }, // E: Debit
+      { wch: 15 }, // F: Credit
     ];
-
-    // C. Row Heights (hpt = height in points)
-    // Adjust these if rows appear too short/tall
-    sheet["!rows"] = [
-      { hpt: 15 }, // Row 0: Top spacing
-      { hpt: 20 }, // Row 1: Top header
-      { hpt: 20 }, // Row 2: Top data
-      { hpt: 20 }, // Row 3: Main headers
-      { hpt: 40 }, // Row 4: Main data (taller for wrap text)
-      { hpt: 20 }, // Row 5: Reduced spacing
-      { hpt: 20 }, // Row 6: Reduced spacing
-      { hpt: 20 }, // Row 7: Accounting header (moved up)
-      { hpt: 20 }, // Row 8: Check
-      { hpt: 20 }, // Row 9: PCash
-      { hpt: 20 }, // Row 10: DM
-      { hpt: 20 }, // Row 11: MC
-      { hpt: 20 }, // Row 12: Breakdown headers
-      { hpt: 20 }, // Row 13: Cost/WIP
-      { hpt: 20 }, // Row 14: Outside svcs
-      { hpt: 20 }, // Row 15: Subt Cost
-      { hpt: 20 }, // Row 16: Empty
-      { hpt: 20 }, // Row 17: Exp/WIP
-      { hpt: 20 }, // Row 18: Empty
-      { hpt: 20 }, // Row 19: Subt Cost
-      { hpt: 20 }, // Row 20: TOTAL
-    ];
-
-    // ========================================
-    // 6. EXPORT THE FILE
-    // ========================================
 
     XLSX.utils.book_append_sheet(workbook, sheet, "Voucher");
-
-    const fileName = `Voucher-${voucher.voucherNumber}.xlsx`;
-    XLSX.writeFile(workbook, fileName);
+    XLSX.writeFile(workbook, `Voucher-${voucher.voucherNumber}.xlsx`);
   };
+
   if (!voucher) return null;
+
+  // ── Build voucher-level totals for detail view ──
+  let dlgTotalNonVat = 0;
+  let dlgTotalVatableBase = 0;
+  let dlgTotalVat = 0;
+  let dlgTotalEwt = 0;
+
+  voucher.items?.forEach((item: any) => {
+    dlgTotalNonVat += parseFloat(String(item.nonVatAmount || "0"));
+    dlgTotalVatableBase += parseFloat(String(item.amount || "0"));
+    dlgTotalVat += parseFloat(String(item.vatAmount || "0"));
+    dlgTotalEwt += parseFloat(String(item.amountWithheld || "0"));
+  });
+
+  const dlgGross = dlgTotalNonVat + dlgTotalVatableBase + dlgTotalVat;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -636,7 +571,6 @@ function VoucherDetailDialog({
                 Export to Excel
               </Button>
             </div>
-
             <span className="font-mono">{voucher.voucherNumber}</span>
             <Badge variant={getStatusVariant(voucher.status)}>
               {getStatusIcon(voucher.status)}
@@ -649,6 +583,7 @@ function VoucherDetailDialog({
         </DialogHeader>
 
         <div className="space-y-6">
+          {/* Header info */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <p className="text-sm text-muted-foreground">Payee</p>
@@ -661,11 +596,20 @@ function VoucherDetailDialog({
                 {format(new Date(voucher.date), "MMMM d, yyyy")}
               </p>
             </div>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div>
-              <p className="text-sm text-muted-foreground">Total Amount</p>
+              <p className="text-sm text-muted-foreground">Category</p>
+              <Badge variant="outline">
+                {(voucher as any).category === "Cost"
+                  ? "Cost / WIP"
+                  : (voucher as any).category === "Asset"
+                    ? "Asset"
+                    : "Expense"}
+              </Badge>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">
+                Net Cash to Vendor
+              </p>
               <p className="font-mono font-semibold text-lg">
                 {formatCurrency(voucher.totalAmount)}
               </p>
@@ -674,63 +618,125 @@ function VoucherDetailDialog({
 
           <Separator />
 
+          {/* Line items */}
           <div>
-            <h3 className="font-medium mb-3">Voucher Items</h3>
+            <h3 className="font-medium mb-3">Line Items</h3>
             <div className="space-y-3">
-              {voucher.items?.map((item, index) => (
-                <div key={index} className="p-3 bg-muted/50 rounded-md">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-sm text-muted-foreground">
-                        Description
-                      </p>
-                      <p className="font-medium">{item.description}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Amount</p>
-                      <p className="font-mono">{formatCurrency(item.amount)}</p>
-                    </div>
-                    {item.vatAmount && (
-                      <div>
-                        <p className="text-sm text-muted-foreground">VAT</p>
-                        <p className="font-mono">
-                          {formatCurrency(item.vatAmount)}
-                        </p>
-                      </div>
-                    )}
-                    {item.amountWithheld && (
-                      <div>
-                        <p className="text-sm text-muted-foreground">
-                          Withheld
-                        </p>
-                        <p className="font-mono">
-                          {formatCurrency(item.amountWithheld)}
-                        </p>
-                      </div>
-                    )}
+              {voucher.items?.map((item: any, index: number) => {
+                const vatableBase = parseFloat(String(item.amount || "0"));
+                const nonVatAmt = parseFloat(String(item.nonVatAmount || "0"));
+                const itemVat = parseFloat(String(item.vatAmount || "0"));
+                const itemEwt = parseFloat(String(item.amountWithheld || "0"));
+                const itemGross = nonVatAmt + vatableBase + itemVat;
+                const itemNet = itemGross - itemEwt;
+                const taxLabel = getTaxLabel(item);
 
-                    {item.chartOfAccount && (
-                      <div>
-                        <p className="text-sm text-muted-foreground">
-                          Chart of Account
-                        </p>
-                        <p className="font-medium">
-                          <span className="font-mono text-muted-foreground">
-                            {item.chartOfAccount.code}
+                return (
+                  <div key={index} className="p-3 bg-muted/50 rounded-md">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="font-medium">{item.description}</p>
+                      <Badge variant="outline" className="text-xs">
+                        {taxLabel}
+                      </Badge>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                      {nonVatAmt > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">
+                            Non-VAT Amount:
                           </span>
-                          {" - "}
-                          {item.chartOfAccount.name}
-                        </p>
+                          <span className="font-mono">
+                            {formatCurrency(nonVatAmt)}
+                          </span>
+                        </div>
+                      )}
+                      {vatableBase > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">
+                            Vatable Base:
+                          </span>
+                          <span className="font-mono">
+                            {formatCurrency(vatableBase)}
+                          </span>
+                        </div>
+                      )}
+                      {itemVat > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">
+                            Input VAT:
+                          </span>
+                          <span className="font-mono">
+                            {formatCurrency(itemVat)}
+                          </span>
+                        </div>
+                      )}
+                      {itemEwt > 0 && (
+                        <div className="flex justify-between text-red-500">
+                          <span>EWT Withheld:</span>
+                          <span className="font-mono">
+                            −{formatCurrency(itemEwt)}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex justify-between border-t pt-1 font-medium col-span-2">
+                        <span>Gross / Net to Vendor:</span>
+                        <span className="font-mono">
+                          {formatCurrency(itemGross)} /{" "}
+                          {formatCurrency(itemNet)}
+                        </span>
                       </div>
-                    )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
+
+            {/* Voucher-level totals in detail view */}
+            {voucher.items && voucher.items.length > 1 && (
+              <div className="mt-3 p-3 bg-muted rounded-md text-sm space-y-1">
+                {dlgTotalNonVat > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Total Non-VAT Base:</span>
+                    <span className="font-mono">
+                      {formatCurrency(dlgTotalNonVat)}
+                    </span>
+                  </div>
+                )}
+                {dlgTotalVatableBase > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Total Vatable Base:</span>
+                    <span className="font-mono">
+                      {formatCurrency(dlgTotalVatableBase)}
+                    </span>
+                  </div>
+                )}
+                {dlgTotalVat > 0 && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Total Input VAT:</span>
+                    <span className="font-mono">
+                      {formatCurrency(dlgTotalVat)}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between font-medium border-t pt-1">
+                  <span>Total Gross:</span>
+                  <span className="font-mono">{formatCurrency(dlgGross)}</span>
+                </div>
+                {dlgTotalEwt > 0 && (
+                  <div className="flex justify-between text-red-500">
+                    <span>Total EWT:</span>
+                    <span className="font-mono">
+                      −{formatCurrency(dlgTotalEwt)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <Separator />
 
+          {/* Requester / Approver */}
           <div className="grid grid-cols-2 gap-4">
             {voucher.requester && (
               <div>
@@ -756,6 +762,7 @@ function VoucherDetailDialog({
 
           <Separator />
 
+          {/* Attachments */}
           <div>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-medium flex items-center gap-2">
@@ -770,14 +777,12 @@ function VoucherDetailDialog({
                     onChange={handleFileChange}
                     className="hidden"
                     accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx"
-                    data-testid="input-upload-attachment"
                   />
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploadAttachment.isPending}
-                    data-testid="button-upload-attachment"
                   >
                     <Upload className="h-4 w-4 mr-2" />
                     {uploadAttachment.isPending ? "Uploading..." : "Upload"}
@@ -797,9 +802,7 @@ function VoucherDetailDialog({
                   <div
                     key={attachment.id}
                     className="flex items-center justify-between p-3 bg-muted/50 rounded-md w-full overflow-hidden"
-                    data-testid={`attachment-${attachment.id}`}
                   >
-                    {/* Left Side Container: Constraints long text */}
                     <div className="flex items-center gap-3 min-w-0 flex-1">
                       <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                       <div className="min-w-0 flex-1">
@@ -812,20 +815,17 @@ function VoucherDetailDialog({
                         <p className="text-xs text-muted-foreground truncate">
                           {format(
                             new Date(attachment.uploadedAt),
-                            "MMM d, yyyy h:mm a"
+                            "MMM d, yyyy h:mm a",
                           )}
                         </p>
                       </div>
                     </div>
-
-                    {/* Right Side Container: Fixed actions */}
                     <div className="flex items-center gap-1 flex-shrink-0 ml-2">
                       <Button
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
                         onClick={() => onViewAttachment(attachment)}
-                        data-testid={`button-view-attachment-${attachment.id}`}
                       >
                         <Eye className="h-4 w-4" />
                       </Button>
@@ -836,7 +836,6 @@ function VoucherDetailDialog({
                           className="h-8 w-8 text-destructive hover:text-destructive"
                           onClick={() => deleteAttachment.mutate(attachment.id)}
                           disabled={deleteAttachment.isPending}
-                          data-testid={`button-delete-attachment-${attachment.id}`}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -863,6 +862,7 @@ function VoucherDetailDialog({
   );
 }
 
+// ─── Attachment viewer dialog (unchanged) ────────────────────
 function AttachmentViewerDialog({
   attachment,
   open,
@@ -882,7 +882,6 @@ function AttachmentViewerDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl w-[95vw] h-[85vh] p-0 gap-0 flex flex-col bg-background overflow-hidden">
-        {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b flex-none">
           <div className="flex items-center gap-2 min-w-0">
             <FileText className="h-5 w-5 text-primary flex-shrink-0" />
@@ -911,7 +910,6 @@ function AttachmentViewerDialog({
           </div>
         </div>
 
-        {/* Content */}
         <div className="flex-1 w-full relative overflow-hidden bg-muted/20">
           {isImage ? (
             <div className="w-full h-full flex items-center justify-center p-4">
@@ -934,8 +932,7 @@ function AttachmentViewerDialog({
               </div>
               <h3 className="text-lg font-medium mb-2">Preview Unavailable</h3>
               <p className="text-muted-foreground mb-6 max-w-sm">
-                This file type cannot be previewed directly in the browser.
-                Please download the file to view it.
+                This file type cannot be previewed. Download it to view.
               </p>
               <Button onClick={() => window.open(downloadUrl, "_blank")}>
                 <Download className="h-4 w-4 mr-2" />
@@ -949,6 +946,7 @@ function AttachmentViewerDialog({
   );
 }
 
+// ─── Main Vouchers page ───────────────────────────────────────
 export default function Vouchers() {
   const { user } = useAuth();
   const [search, setSearch] = useState("");
@@ -1016,10 +1014,9 @@ export default function Vouchers() {
       v.payee.toLowerCase().includes(search.toLowerCase()) ||
       v.voucherNumber.toLowerCase().includes(search.toLowerCase()) ||
       v.items?.some((item) =>
-        item.description.toLowerCase().includes(search.toLowerCase())
+        item.description.toLowerCase().includes(search.toLowerCase()),
       ) ||
       false;
-
     const matchesStatus = statusFilter === "all" || v.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
@@ -1031,10 +1028,12 @@ export default function Vouchers() {
       "Voucher #",
       "Date",
       "Payee",
+      "Category",
       "Description",
-      "Amount",
+      "Non-VAT Base",
+      "Vatable Base",
       "VAT",
-      "Withheld",
+      "EWT",
       "Status",
       "Approver",
     ];
@@ -1043,20 +1042,38 @@ export default function Vouchers() {
       v.voucherNumber,
       format(new Date(v.date), "yyyy-MM-dd"),
       v.payee,
+      (v as any).category || "",
       v.items?.map((item) => item.description).join("; ") || "",
-      v.totalAmount,
       v.items
-        ?.reduce((sum, item) => sum + parseFloat(item.vatAmount || "0"), 0)
-        .toString() || "",
+        ?.reduce(
+          (sum, item) =>
+            sum + parseFloat(String((item as any).nonVatAmount || "0")),
+          0,
+        )
+        .toFixed(2),
       v.items
-        ?.reduce((sum, item) => sum + parseFloat(item.amountWithheld || "0"), 0)
-        .toString() || "",
+        ?.reduce((sum, item) => sum + parseFloat(String(item.amount || "0")), 0)
+        .toFixed(2),
+      v.items
+        ?.reduce(
+          (sum, item) => sum + parseFloat(String(item.vatAmount || "0")),
+          0,
+        )
+        .toFixed(2),
+      v.items
+        ?.reduce(
+          (sum, item) => sum + parseFloat(String(item.amountWithheld || "0")),
+          0,
+        )
+        .toFixed(2),
       v.status,
       v.approver ? `${v.approver.firstName} ${v.approver.lastName}` : "",
     ]);
 
     const csvContent = [headers, ...rows]
-      .map((row: string[]) => row.map((cell: string) => `"${cell}"`).join(","))
+      .map((row: any[]) =>
+        row.map((cell: any) => `"${String(cell)}"`).join(","),
+      )
       .join("\n");
 
     const blob = new Blob([csvContent], { type: "text/csv" });
@@ -1079,13 +1096,13 @@ export default function Vouchers() {
             {user?.role === "approver"
               ? "Review vouchers created by preparers"
               : user?.role === "preparer"
-              ? "Manage petty cash disbursement vouchers"
-              : "View all vouchers"}
+                ? "Manage petty cash disbursement vouchers"
+                : "View all vouchers"}
           </p>
         </div>
         {canCreateVouchers(user?.role || "") && (
           <Link href="/vouchers/new">
-            <Button data-testid="button-new-voucher">
+            <Button>
               <Plus className="h-4 w-4 mr-2" />
               New Voucher
             </Button>
@@ -1104,7 +1121,6 @@ export default function Vouchers() {
               size="sm"
               onClick={handleExportCSV}
               disabled={!filteredVouchers || filteredVouchers.length === 0}
-              data-testid="button-export-csv"
             >
               <Download className="h-4 w-4 mr-2" />
               Export CSV
@@ -1120,14 +1136,10 @@ export default function Vouchers() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-9"
-                data-testid="input-search-vouchers"
               />
             </div>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger
-                className="w-[180px]"
-                data-testid="select-status-filter"
-              >
+              <SelectTrigger className="w-[180px]">
                 <SelectValue placeholder="Filter by status" />
               </SelectTrigger>
               <SelectContent>
@@ -1178,9 +1190,10 @@ export default function Vouchers() {
                       <TableHead className="w-[120px]">Voucher #</TableHead>
                       <TableHead className="w-[100px]">Date</TableHead>
                       <TableHead>Payee</TableHead>
+                      <TableHead className="w-[80px]">Category</TableHead>
                       <TableHead>Description</TableHead>
                       <TableHead className="w-[100px]">Attachments</TableHead>
-                      <TableHead className="text-right">Total Amount</TableHead>
+                      <TableHead className="text-right">Net Amount</TableHead>
                       <TableHead className="w-[100px]">Status</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -1190,7 +1203,6 @@ export default function Vouchers() {
                         key={voucher.id}
                         className="hover-elevate cursor-pointer"
                         onClick={() => handleRowClick(voucher)}
-                        data-testid={`row-voucher-${voucher.id}`}
                       >
                         <TableCell className="font-mono text-sm">
                           {voucher.voucherNumber}
@@ -1200,6 +1212,11 @@ export default function Vouchers() {
                         </TableCell>
                         <TableCell className="font-medium">
                           {voucher.payee}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="text-xs">
+                            {(voucher as any).category || "Exp"}
+                          </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground max-w-[200px] truncate">
                           {voucher.items?.[0]?.description || ""}
@@ -1234,7 +1251,7 @@ export default function Vouchers() {
               <p className="text-muted-foreground mb-4">No vouchers found</p>
               {canCreateVouchers(user?.role || "") && (
                 <Link href="/vouchers/new">
-                  <Button data-testid="button-create-voucher-empty">
+                  <Button>
                     <Plus className="h-4 w-4 mr-2" />
                     Create Voucher
                   </Button>

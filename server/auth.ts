@@ -4,8 +4,11 @@ import session from "express-session";
 import express, { type Express } from "express";
 import crypto from "crypto";
 import { promisify } from "util";
-import { storage } from "./storage";
-import { User } from "@shared/schema";
+
+// ✅ Fixed local import extensions
+import { storage } from "./storage.ts";
+// ✅ Replaced alias with relative path
+import { User } from "../shared/schema.ts";
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -27,9 +30,9 @@ export function setupAuth(app: Express) {
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false, // Set to true in production with HTTPS
-      httpOnly: true, // Prevent client-side access to session cookie
-      maxAge: 1000 * 60 * 60 * 24, // 24 hours
+      secure: false,
+      httpOnly: true,
+      maxAge: 1000 * 60 * 60 * 24,
     },
   };
 
@@ -48,7 +51,7 @@ export function setupAuth(app: Express) {
       } catch (err) {
         return done(err);
       }
-    })
+    }),
   );
 
   passport.serializeUser((user: any, done) => done(null, user.id));
@@ -94,17 +97,30 @@ export function setupAuth(app: Express) {
     }
   });
 
-  app.post("/api/login", passport.authenticate("local"), (req, res) => {
-    res.json(req.user);
+  app.post("/api/login", (req, res, next) => {
+    passport.authenticate("local", (err: any, user: any, info: any) => {
+      if (err) return next(err);
+
+      // If authentication fails, send a JSON response instead of plain text
+      if (!user) {
+        return res.status(401).json({
+          message: info?.message || "Invalid username or password",
+        });
+      }
+
+      // If successful, log the user in
+      req.login(user, (err) => {
+        if (err) return next(err);
+        return res.json(user);
+      });
+    })(req, res, next);
   });
 
   app.post("/api/logout", (req, res, next) => {
     req.logout((err) => {
       if (err) return next(err);
-      // Destroy the session completely
       req.session.destroy((err) => {
         if (err) return next(err);
-        // Clear the session cookie
         res.clearCookie("connect.sid", { path: "/" });
         res.sendStatus(200);
       });

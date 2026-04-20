@@ -31,7 +31,6 @@ import { db } from "./db";
 import { eq, desc, sql, and, inArray, gte, lte, between } from "drizzle-orm";
 
 export interface IStorage {
-  // User operations
   getUser(id: number | string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: any): Promise<User>;
@@ -39,57 +38,67 @@ export interface IStorage {
   getAllUsers(): Promise<User[]>;
   updateUserRole(id: number, role: string): Promise<User | undefined>;
 
-  // Voucher operations
-  getVouchers(status?: string): Promise<Voucher[]>;
+  getVouchers(
+    status?: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<Voucher[]>;
   getVoucherById(id: number): Promise<Voucher | undefined>;
+
   createVoucher(voucher: {
+    companyName: string;
     voucherNumber: string;
     date: Date;
     payee: string;
+    category: string;
     totalAmount: string;
     requestedById: number;
     approvedById?: number | null;
     status: string;
     supportingDocsSubmitted?: Date | null;
-    items: InsertVoucherItem[];
+    items: (InsertVoucherItem & {
+      category: string;
+      nonVatAmount?: string | null; // ← NEW: non-vatable portion base amount
+    })[];
   }): Promise<Voucher>;
+
   updateVoucherStatus(
     id: number,
     status: string,
-    approvedById?: number
+    approvedById?: number,
   ): Promise<Voucher | undefined>;
   getVoucherStats(): Promise<{
     totalDisbursed: string;
     pendingCount: number;
     approvedCount: number;
   }>;
-  getVouchersWithRelations(status?: string): Promise<any[]>;
+  getVouchersWithRelations(
+    status?: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<any[]>;
 
-  // Chart of Accounts operations
   getChartOfAccounts(): Promise<ChartOfAccount[]>;
   getChartOfAccountById(id: number): Promise<ChartOfAccount | undefined>;
   createChartOfAccount(coa: InsertChartOfAccount): Promise<ChartOfAccount>;
   updateChartOfAccount(
     id: number,
-    data: Partial<InsertChartOfAccount>
+    data: Partial<InsertChartOfAccount>,
   ): Promise<ChartOfAccount | undefined>;
   deleteChartOfAccount(id: number): Promise<void>;
 
-  // Petty Cash Fund operations
   getFund(): Promise<PettyCashFund | undefined>;
   createFund(fund: InsertPettyCashFund): Promise<PettyCashFund>;
   updateFund(
     id: number,
-    data: Partial<InsertPettyCashFund>
+    data: Partial<InsertPettyCashFund>,
   ): Promise<PettyCashFund | undefined>;
 
-  // Replenishment operations
   createReplenishmentRequest(
-    request: InsertReplenishmentRequest & { voucherIds: number[] }
+    request: InsertReplenishmentRequest & { voucherIds: number[] },
   ): Promise<ReplenishmentRequest>;
   getReplenishmentRequests(): Promise<ReplenishmentRequest[]>;
 
-  // Audit log operations
   createAuditLog(log: InsertAuditLog): Promise<AuditLog>;
   getAuditLogs(entityType?: string, entityId?: string): Promise<any[]>;
   getRecentAuditLogs(limit?: number): Promise<any[]>;
@@ -103,28 +112,26 @@ export interface IStorage {
       action?: string;
       startDate?: Date;
       endDate?: Date;
-    }
+    },
   ): Promise<{ logs: any[]; total: number }>;
   cleanupObsoleteAuditLogs(): Promise<number>;
 
-  // Budget tracking operations
   createAccountBudget(budget: InsertAccountBudget): Promise<AccountBudget>;
   getAccountBudgets(): Promise<any[]>;
   getAccountBudgetById(id: number): Promise<AccountBudget | undefined>;
   updateAccountBudget(
     id: number,
-    data: Partial<InsertAccountBudget>
+    data: Partial<InsertAccountBudget>,
   ): Promise<AccountBudget | undefined>;
   deleteAccountBudget(id: number): Promise<void>;
   getBudgetSpending(
     chartOfAccountId: number,
     startDate: Date,
-    endDate: Date
+    endDate: Date,
   ): Promise<string>;
 
-  // Voucher attachment operations
   createVoucherAttachment(
-    attachment: InsertVoucherAttachment
+    attachment: InsertVoucherAttachment,
   ): Promise<VoucherAttachment>;
   getVoucherAttachments(voucherId: number): Promise<VoucherAttachment[]>;
   getVoucherAttachmentById(id: number): Promise<VoucherAttachment | undefined>;
@@ -150,8 +157,6 @@ export class DatabaseStorage implements IStorage {
     const [user] = await db.select().from(users).where(eq(users.id, parsedId));
     return user;
   }
-
-  // User operations
 
   async upsertUser(userData: UpsertUser): Promise<User> {
     const [user] = await db
@@ -182,11 +187,10 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  // Voucher operations
   async getVouchers(
     status?: string,
     limit?: number,
-    offset?: number
+    offset?: number,
   ): Promise<Voucher[]> {
     const builder = db.select().from(vouchers);
     if (status) {
@@ -210,69 +214,94 @@ export class DatabaseStorage implements IStorage {
     return voucher;
   }
 
+  // ============================================================
+  // createVoucher — FIXED
+  //
+  // Key changes:
+  //   1. Saves `category` at the voucher level
+  //   2. Saves `nonVatAmount` on each voucher item (the non-vatable
+  //      base portion). Without this, the Excel export can't show
+  //      the Non-VAT column correctly.
+  //   3. The fund balance deduction uses `totalAmount` which is now
+  //      the CORRECT net cash (nonVat + vatableBase + vat − ewt).
+  // ============================================================
   async createVoucher(voucher: {
+    companyName: string;
     voucherNumber: string;
     date: Date;
     payee: string;
+    category: string;
     totalAmount: string;
     requestedById: number;
     approvedById?: number | null;
     status: string;
     supportingDocsSubmitted?: Date | null;
-    items: InsertVoucherItem[];
+    items: (InsertVoucherItem & {
+      category: string;
+      nonVatAmount?: string | null;
+    })[];
   }): Promise<Voucher> {
-    // Start transaction
     const result = await db.transaction(async (tx) => {
-      // Create voucher header
+      // ── 1. Insert the voucher record ────────────────────────
       const [created] = await tx
         .insert(vouchers)
         .values({
+          companyName: voucher.companyName,
           voucherNumber: voucher.voucherNumber,
           date: voucher.date,
           payee: voucher.payee,
+          // FIXED: save voucher-level category
+          category: voucher.category,
           totalAmount: voucher.totalAmount,
           requestedById: voucher.requestedById,
           approvedById: voucher.approvedById,
           status: voucher.status,
           supportingDocsSubmitted: voucher.supportingDocsSubmitted,
-        })
+        } as any)
         .returning();
 
-      // Create voucher items
+      // ── 2. Insert line items ────────────────────────────────
       if (voucher.items && voucher.items.length > 0) {
         await tx.insert(voucherItems).values(
           voucher.items.map((item) => ({
             voucherId: created.id,
             description: item.description,
+            category: item.category,
+            // FIXED: save the non-vatable base amount separately
+            // `amount`       = vatableBase (back-calc'd from gross)
+            // `nonVatAmount` = non-vatable portion (e.g. transport)
+            nonVatAmount: item.nonVatAmount || null,
             amount: item.amount,
             chartOfAccountId: item.chartOfAccountId,
             vatAmount: item.vatAmount,
             amountWithheld: item.amountWithheld,
-          }))
+          })) as any,
         );
       }
 
-      // Update fund balance (only if fund exists)
+      // ── 3. Deduct from petty cash fund ──────────────────────
+      // totalAmount = net cash actually leaving the fund
+      // (nonVat + vatableBase + vat − ewt)
       const fund = await tx.select().from(pettyCashFund).limit(1);
       if (fund.length > 0) {
         const currentBalance = parseFloat(fund[0].currentBalance);
         const voucherAmount = parseFloat(voucher.totalAmount);
 
-        // Check if fund has sufficient balance
         if (currentBalance < voucherAmount) {
           throw new Error(
-            `Insufficient fund balance. Available: ${currentBalance}, Required: ${voucherAmount}`
+            `Insufficient fund balance. Available: ${currentBalance.toFixed(2)}, Required: ${voucherAmount.toFixed(2)}`,
           );
         }
 
         const newBalance = currentBalance - voucherAmount;
         await tx
           .update(pettyCashFund)
-          .set({ currentBalance: newBalance.toString(), updatedAt: new Date() })
+          .set({
+            currentBalance: newBalance.toString(),
+            updatedAt: new Date(),
+          })
           .where(eq(pettyCashFund.id, fund[0].id));
       }
-      // If no fund exists, allow voucher creation but log a warning
-      // This allows the system to work even without fund configuration
 
       return created;
     });
@@ -283,7 +312,7 @@ export class DatabaseStorage implements IStorage {
   async updateVoucherStatus(
     id: number,
     status: string,
-    approvedById?: number
+    approvedById?: number,
   ): Promise<Voucher | undefined> {
     const updateData: any = { status };
     if (approvedById) {
@@ -318,7 +347,7 @@ export class DatabaseStorage implements IStorage {
   async getVouchersWithRelations(
     status?: string,
     limit?: number,
-    offset?: number
+    offset?: number,
   ): Promise<any[]> {
     const voucherList = await this.getVouchers(status, limit, offset);
     const result = [];
@@ -331,13 +360,12 @@ export class DatabaseStorage implements IStorage {
         ? await this.getUser(v.approvedById)
         : null;
 
-      // Get voucher items with their chart of accounts
       const items = await db
         .select()
         .from(voucherItems)
         .leftJoin(
           chartOfAccounts,
-          eq(voucherItems.chartOfAccountId, chartOfAccounts.id)
+          eq(voucherItems.chartOfAccountId, chartOfAccounts.id),
         )
         .where(eq(voucherItems.voucherId, v.id));
 
@@ -346,7 +374,6 @@ export class DatabaseStorage implements IStorage {
         chartOfAccount: item.chart_of_accounts,
       }));
 
-      // Get attachment count
       const attachments = await this.getVoucherAttachments(v.id);
       const attachmentCount = attachments.length;
 
@@ -362,7 +389,6 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  // Chart of Accounts operations
   async getChartOfAccounts(): Promise<ChartOfAccount[]> {
     return await db
       .select()
@@ -379,7 +405,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createChartOfAccount(
-    coa: InsertChartOfAccount
+    coa: InsertChartOfAccount,
   ): Promise<ChartOfAccount> {
     const [created] = await db
       .insert(chartOfAccounts)
@@ -390,7 +416,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateChartOfAccount(
     id: number,
-    data: Partial<InsertChartOfAccount>
+    data: Partial<InsertChartOfAccount>,
   ): Promise<ChartOfAccount | undefined> {
     const [updated] = await db
       .update(chartOfAccounts)
@@ -401,7 +427,6 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteChartOfAccount(id: number): Promise<void> {
-    // Check for references in voucherItems
     const voucherItemRefs = await db
       .select()
       .from(voucherItems)
@@ -409,11 +434,10 @@ export class DatabaseStorage implements IStorage {
 
     if (voucherItemRefs.length > 0) {
       throw new Error(
-        `Cannot delete chart of account: it is referenced by ${voucherItemRefs.length} voucher item(s)`
+        `Cannot delete chart of account: it is referenced by ${voucherItemRefs.length} voucher item(s)`,
       );
     }
 
-    // Check for references in accountBudgets
     const budgetRefs = await db
       .select()
       .from(accountBudgets)
@@ -421,14 +445,13 @@ export class DatabaseStorage implements IStorage {
 
     if (budgetRefs.length > 0) {
       throw new Error(
-        `Cannot delete chart of account: it is referenced by ${budgetRefs.length} budget(s)`
+        `Cannot delete chart of account: it is referenced by ${budgetRefs.length} budget(s)`,
       );
     }
 
     await db.delete(chartOfAccounts).where(eq(chartOfAccounts.id, id));
   }
 
-  // Petty Cash Fund operations
   async getFund(): Promise<PettyCashFund | undefined> {
     const [fund] = await db.select().from(pettyCashFund).limit(1);
     return fund;
@@ -444,7 +467,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateFund(
     id: number,
-    data: Partial<InsertPettyCashFund>
+    data: Partial<InsertPettyCashFund>,
   ): Promise<PettyCashFund | undefined> {
     const [updated] = await db
       .update(pettyCashFund)
@@ -454,23 +477,20 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  // Replenishment operations
   async createReplenishmentRequest(
-    request: InsertReplenishmentRequest & { voucherIds: number[] }
+    request: InsertReplenishmentRequest & { voucherIds: number[] },
   ): Promise<ReplenishmentRequest> {
     const [created] = await db
       .insert(replenishmentRequests)
       .values(request as any)
       .returning();
 
-    // Mark vouchers as replenished
     if (request.voucherIds && request.voucherIds.length > 0) {
       await db
         .update(vouchers)
         .set({ status: "replenished" })
         .where(inArray(vouchers.id, request.voucherIds));
 
-      // Restore fund balance
       const fund = await this.getFund();
       if (fund) {
         await db
@@ -493,7 +513,6 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(replenishmentRequests.requestDate));
   }
 
-  // Audit log operations
   async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
     const [created] = await db
       .insert(auditLogs)
@@ -503,8 +522,6 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAuditLogs(entityType?: string, entityId?: string): Promise<any[]> {
-    let query = db.select().from(auditLogs);
-
     if (entityType && entityId) {
       const logs = await db
         .select()
@@ -512,8 +529,8 @@ export class DatabaseStorage implements IStorage {
         .where(
           and(
             eq(auditLogs.entityType, entityType),
-            eq(auditLogs.entityId, entityId)
-          )
+            eq(auditLogs.entityId, entityId),
+          ),
         )
         .orderBy(desc(auditLogs.timestamp));
 
@@ -575,7 +592,7 @@ export class DatabaseStorage implements IStorage {
       action?: string;
       startDate?: Date;
       endDate?: Date;
-    }
+    },
   ): Promise<{ logs: any[]; total: number }> {
     let whereConditions = [];
 
@@ -601,7 +618,6 @@ export class DatabaseStorage implements IStorage {
     const whereClause =
       whereConditions.length > 0 ? and(...whereConditions) : undefined;
 
-    // Get total count
     const totalResult = await db
       .select({ count: sql<number>`count(*)` })
       .from(auditLogs)
@@ -609,7 +625,6 @@ export class DatabaseStorage implements IStorage {
 
     const total = totalResult[0]?.count || 0;
 
-    // Get paginated logs
     const logs = await db
       .select()
       .from(auditLogs)
@@ -628,7 +643,6 @@ export class DatabaseStorage implements IStorage {
   }
 
   async cleanupObsoleteAuditLogs(): Promise<number> {
-    // Delete audit logs older than 1 year
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
@@ -639,9 +653,8 @@ export class DatabaseStorage implements IStorage {
     return result.rowCount || 0;
   }
 
-  // Budget tracking operations
   async createAccountBudget(
-    budget: InsertAccountBudget
+    budget: InsertAccountBudget,
   ): Promise<AccountBudget> {
     const [created] = await db
       .insert(accountBudgets)
@@ -662,7 +675,7 @@ export class DatabaseStorage implements IStorage {
       const spending = await this.getBudgetSpending(
         budget.chartOfAccountId,
         budget.startDate,
-        budget.endDate
+        budget.endDate,
       );
       result.push({
         ...budget,
@@ -690,7 +703,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateAccountBudget(
     id: number,
-    data: Partial<InsertAccountBudget>
+    data: Partial<InsertAccountBudget>,
   ): Promise<AccountBudget | undefined> {
     const [updated] = await db
       .update(accountBudgets)
@@ -707,7 +720,7 @@ export class DatabaseStorage implements IStorage {
   async getBudgetSpending(
     chartOfAccountId: number,
     startDate: Date,
-    endDate: Date
+    endDate: Date,
   ): Promise<string> {
     const result = await db
       .select({
@@ -720,15 +733,14 @@ export class DatabaseStorage implements IStorage {
           eq(voucherItems.chartOfAccountId, chartOfAccountId),
           gte(vouchers.date, startDate),
           lte(vouchers.date, endDate),
-          sql`${vouchers.status} != 'rejected'`
-        )
+          sql`${vouchers.status} != 'rejected'`,
+        ),
       );
     return result[0]?.total || "0";
   }
 
-  // Voucher attachment operations
   async createVoucherAttachment(
-    attachment: InsertVoucherAttachment
+    attachment: InsertVoucherAttachment,
   ): Promise<VoucherAttachment> {
     const [created] = await db
       .insert(voucherAttachments)
@@ -746,7 +758,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getVoucherAttachmentById(
-    id: number
+    id: number,
   ): Promise<VoucherAttachment | undefined> {
     const [attachment] = await db
       .select()
@@ -756,21 +768,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteVoucherAttachment(id: number): Promise<void> {
-    // Get attachment info first to delete the file
     const [attachment] = await db
       .select()
       .from(voucherAttachments)
       .where(eq(voucherAttachments.id, id));
 
     if (attachment) {
-      // Delete file from disk if it exists
       try {
-        const fs = require("fs").promises;
-        const path = require("path");
-        const fullPath = path.resolve(attachment.filePath);
-        await fs.unlink(fullPath);
+        const fsModule = require("fs").promises;
+        const pathModule = require("path");
+        const fullPath = pathModule.resolve(attachment.filePath);
+        await fsModule.unlink(fullPath);
       } catch (error) {
-        // File might not exist, continue with database deletion
         console.warn(`Could not delete file for attachment ${id}:`, error);
       }
     }

@@ -11,40 +11,18 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 
-// Configure multer for file uploads (old multer and uploads attchments code kept for reference)
-/* const multerStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(process.cwd(), "server", "uploads");
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    // Generate a temporary filename
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  },
-});
-
-const upload = multer({
-  storage: multerStorage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-}); */
-
-// Define where files are stored physically on the server
 const UPLOADS_DIR = path.join(process.cwd(), "server", "uploads");
 
-// Auto-create the directory if it doesn't exist
 if (!fs.existsSync(UPLOADS_DIR)) {
   console.log(`[System] Creating uploads directory at: ${UPLOADS_DIR}`);
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Configure Multer for Disk Storage
 const uploadStorage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, UPLOADS_DIR);
   },
   filename: function (req, file, cb) {
-    // Sanitize filename and add timestamp to prevent collisions
     const ext = path.extname(file.originalname);
     const name = path
       .basename(file.originalname, ext)
@@ -56,7 +34,7 @@ const uploadStorage = multer.diskStorage({
 
 const upload = multer({
   storage: uploadStorage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 function generateVoucherNumber(): string {
@@ -69,7 +47,6 @@ function generateVoucherNumber(): string {
   return `PCV-${year}${month}-${random}`;
 }
 
-// Role-based authorization middleware
 function requireRole(...allowedRoles: string[]) {
   return async (req: any, res: any, next: any) => {
     const userIdRaw = req.user?.id;
@@ -98,7 +75,6 @@ function requireRole(...allowedRoles: string[]) {
 export async function registerRoutes(app: Express): Promise<void> {
   app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 
-  // Auth middleware helper using passport sessions
   const isAuthenticated = (req: any, res: any, next: any) => {
     if (!req.isAuthenticated || !req.isAuthenticated()) {
       return res.status(401).json({ message: "Unauthorized" });
@@ -106,7 +82,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     next();
   };
 
-  // Auth routes
+  // ── Auth ──────────────────────────────────────────────────────
   app.get("/api/auth/user", isAuthenticated, async (req: any, res) => {
     try {
       const userId = req.user.id;
@@ -119,7 +95,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
-  // Users routes
+  // ── Users ─────────────────────────────────────────────────────
   app.get("/api/users", isAuthenticated, async (req, res) => {
     try {
       const users = await storage.getAllUsers();
@@ -153,10 +129,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error updating user role:", error);
         res.status(500).json({ message: "Failed to update user role" });
       }
-    }
+    },
   );
 
-  // Vouchers routes
+  // ── Vouchers GET ──────────────────────────────────────────────
   app.get("/api/vouchers", isAuthenticated, async (req, res) => {
     try {
       const status = req.query.status as string | undefined;
@@ -169,7 +145,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       const vouchers = await storage.getVouchersWithRelations(
         status,
         limit,
-        offset
+        offset,
       );
       res.json(vouchers);
     } catch (error) {
@@ -188,13 +164,24 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
+  // ── Vouchers POST ─────────────────────────────────────────────
+  // ===========================================================
+  // BUG FIX: The total was previously calculated as:
+  //   amount (vatableBase) + vat - ewt
+  // which IGNORED nonVatAmount (e.g. the ₱377 non-vat portion).
+  //
+  // CORRECT formula:
+  //   nonVatAmount + vatableBase + vat - ewt = total net cash
+  //
+  // Example from the physical voucher:
+  //   377 (non-vat) + 2008.93 (vatable base) + 241.07 (VAT) - 0 (EWT) = 2627.00 ✓
+  // ===========================================================
   app.post("/api/vouchers", isAuthenticated, async (req: any, res) => {
     try {
       const userIdRaw = req.user.id;
       const userId =
         typeof userIdRaw === "string" ? parseInt(userIdRaw) : userIdRaw;
 
-      // Validate required fields
       if (
         !req.body.payee ||
         !req.body.date ||
@@ -204,45 +191,70 @@ export async function registerRoutes(app: Express): Promise<void> {
       ) {
         return res.status(400).json({
           message:
-            "Missing required fields: payee, date, and items array are required",
+            "Missing required fields: payee, date, and items are required",
         });
       }
 
-      // Validate and calculate total amount
-      let totalAmount = 0;
+      let calculatedTotal = 0;
       const validatedItems = [];
 
       for (const item of req.body.items) {
-        if (!item.description || !item.amount) {
+        if (!item.description) {
+          return res
+            .status(400)
+            .json({ message: "Each item must have a description" });
+        }
+
+        // ── The form sends these fields: ──────────────────────
+        //   item.nonVatAmount  = non-vatable base (e.g. "377.00")
+        //   item.amount        = vatable base back-calc'd from gross (e.g. "2008.93")
+        //   item.vatAmount     = input VAT extracted (e.g. "241.07")
+        //   item.amountWithheld = EWT computed on total base
+        // ─────────────────────────────────────────────────────
+        const nonVatAmt = parseFloat(item.nonVatAmount) || 0;
+        const vatableBase = parseFloat(item.amount) || 0;
+        const vat = parseFloat(item.vatAmount) || 0;
+        const ewt = parseFloat(item.amountWithheld) || 0;
+
+        if (nonVatAmt < 0 || vatableBase < 0) {
+          return res
+            .status(400)
+            .json({ message: "Amounts must be non-negative" });
+        }
+
+        if (nonVatAmt === 0 && vatableBase === 0) {
           return res.status(400).json({
-            message: "Each item must have description and amount",
+            message:
+              "Each item must have at least one amount (non-vat or vatable)",
           });
         }
 
-        const amount = parseFloat(item.amount);
-        if (isNaN(amount) || amount <= 0) {
-          return res
-            .status(400)
-            .json({ message: "Item amount must be a positive number" });
-        }
-
-        totalAmount += amount;
+        // ── FIXED TOTAL FORMULA ───────────────────────────────
+        // Total net cash = nonVat + vatableBase + VAT − EWT
+        calculatedTotal += nonVatAmt + vatableBase + vat - ewt;
 
         validatedItems.push({
           description: item.description,
-          amount: item.amount,
+          // category is a voucher-level attribute (req.body.category),
+          // but we mirror it on each item for backward compatibility.
+          category: req.body.category || "Exp",
+          // ── Store nonVatAmount so the Excel export can read it ──
+          nonVatAmount: nonVatAmt > 0 ? nonVatAmt.toFixed(2) : null,
+          amount: vatableBase.toFixed(2), // purely vatable base
           chartOfAccountId: item.chartOfAccountId
             ? parseInt(item.chartOfAccountId)
             : null,
-          vatAmount: item.vatAmount || null,
-          amountWithheld: item.amountWithheld || null,
+          vatAmount: vat > 0 ? vat.toFixed(2) : null,
+          amountWithheld: ewt > 0 ? ewt.toFixed(2) : null,
         });
       }
 
       const voucherData = {
+        companyName: req.body.companyName || "",
         date: new Date(req.body.date),
         payee: req.body.payee,
-        totalAmount: totalAmount.toFixed(2),
+        category: req.body.category || "Exp", // voucher-level category
+        totalAmount: calculatedTotal.toFixed(2), // FIXED: includes nonVatAmount
         approvedById: req.body.approvedById || null,
         status: req.body.status || "pending",
         requestedById: userId,
@@ -252,7 +264,6 @@ export async function registerRoutes(app: Express): Promise<void> {
 
       const voucher = await storage.createVoucher(voucherData);
 
-      // Log voucher creation
       await storage.createAuditLog({
         entityType: "voucher",
         entityId: voucher.id.toString(),
@@ -261,16 +272,19 @@ export async function registerRoutes(app: Express): Promise<void> {
         userId,
         description: `Created voucher ${voucher.voucherNumber} for ${
           req.body.payee
-        } - ${totalAmount.toFixed(2)}`,
+        } — ₱${calculatedTotal.toFixed(2)}`,
       });
 
       res.status(201).json(voucher);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating voucher:", error);
-      res.status(500).json({ message: "Failed to create voucher" });
+      res.status(500).json({
+        message: "System Error: " + (error.message || error.toString()),
+      });
     }
   });
 
+  // ── Voucher Approve / Reject ──────────────────────────────────
   app.patch(
     "/api/vouchers/:id/approve",
     isAuthenticated,
@@ -286,13 +300,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         const voucher = await storage.updateVoucherStatus(
           parseInt(id),
           "approved",
-          userId
+          userId,
         );
         if (!voucher) {
           return res.status(404).json({ message: "Voucher not found" });
         }
 
-        // Log approval
         await storage.createAuditLog({
           entityType: "voucher",
           entityId: id,
@@ -308,7 +321,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error approving voucher:", error);
         res.status(500).json({ message: "Failed to approve voucher" });
       }
-    }
+    },
   );
 
   app.patch(
@@ -326,13 +339,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         const voucher = await storage.updateVoucherStatus(
           parseInt(id),
           "rejected",
-          userId
+          userId,
         );
         if (!voucher) {
           return res.status(404).json({ message: "Voucher not found" });
         }
 
-        // Log rejection
         await storage.createAuditLog({
           entityType: "voucher",
           entityId: id,
@@ -348,10 +360,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error rejecting voucher:", error);
         res.status(500).json({ message: "Failed to reject voucher" });
       }
-    }
+    },
   );
 
-  // Chart of Accounts routes
+  // ── Chart of Accounts ─────────────────────────────────────────
   app.get("/api/chart-of-accounts", isAuthenticated, async (req, res) => {
     try {
       const accounts = await storage.getChartOfAccounts();
@@ -381,7 +393,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error creating chart of account:", error);
         res.status(500).json({ message: "Failed to create chart of account" });
       }
-    }
+    },
   );
 
   app.patch(
@@ -400,7 +412,7 @@ export async function registerRoutes(app: Express): Promise<void> {
 
         const account = await storage.updateChartOfAccount(
           parseInt(id),
-          result.data
+          result.data,
         );
         if (!account) {
           return res
@@ -412,7 +424,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error updating chart of account:", error);
         res.status(500).json({ message: "Failed to update chart of account" });
       }
-    }
+    },
   );
 
   app.delete(
@@ -431,10 +443,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         }
         res.status(500).json({ message: "Failed to delete chart of account" });
       }
-    }
+    },
   );
 
-  // Petty Cash Fund routes
+  // ── Petty Cash Fund ───────────────────────────────────────────
   app.get("/api/fund", isAuthenticated, async (req, res) => {
     try {
       const fund = await storage.getFund();
@@ -483,7 +495,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error creating fund:", error);
         res.status(500).json({ message: "Failed to create fund" });
       }
-    }
+    },
   );
 
   app.patch(
@@ -502,10 +514,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error updating fund:", error);
         res.status(500).json({ message: "Failed to update fund" });
       }
-    }
+    },
   );
 
-  // Replenishment routes
+  // ── Replenishment ─────────────────────────────────────────────
   app.get("/api/replenishment-requests", isAuthenticated, async (req, res) => {
     try {
       const requests = await storage.getReplenishmentRequests();
@@ -548,7 +560,6 @@ export async function registerRoutes(app: Express): Promise<void> {
 
         const request = await storage.createReplenishmentRequest(result.data);
 
-        // Log the replenishment action
         await storage.createAuditLog({
           entityType: "replenishment",
           entityId: request.id.toString(),
@@ -565,10 +576,10 @@ export async function registerRoutes(app: Express): Promise<void> {
           .status(500)
           .json({ message: "Failed to create replenishment request" });
       }
-    }
+    },
   );
 
-  // Audit log routes
+  // ── Audit Logs ────────────────────────────────────────────────
   app.get(
     "/api/audit-logs",
     isAuthenticated,
@@ -586,7 +597,6 @@ export async function registerRoutes(app: Express): Promise<void> {
           endDate,
         } = req.query;
 
-        // If limit and offset are provided, use paginated version
         if (limit && offset) {
           const filters = {
             entityType: entityType as string,
@@ -600,32 +610,30 @@ export async function registerRoutes(app: Express): Promise<void> {
           const result = await storage.getAuditLogsPaginated(
             parseInt(limit as string),
             parseInt(offset as string),
-            filters
+            filters,
           );
           return res.json(result);
         }
 
-        // Legacy support for old endpoints
         if (limit) {
           const logs = await storage.getRecentAuditLogs(
-            parseInt(limit as string)
+            parseInt(limit as string),
           );
           return res.json({ logs, total: logs.length });
         }
 
         const logs = await storage.getAuditLogs(
           entityType as string | undefined,
-          entityId as string | undefined
+          entityId as string | undefined,
         );
         res.json({ logs, total: logs.length });
       } catch (error) {
         console.error("Error fetching audit logs:", error);
         res.status(500).json({ message: "Failed to fetch audit logs" });
       }
-    }
+    },
   );
 
-  // Cleanup obsolete audit logs
   app.delete(
     "/api/audit-logs/cleanup",
     isAuthenticated,
@@ -638,10 +646,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error cleaning up audit logs:", error);
         res.status(500).json({ message: "Failed to cleanup audit logs" });
       }
-    }
+    },
   );
 
-  // Budget tracking routes
+  // ── Budgets ───────────────────────────────────────────────────
   app.get("/api/budgets", isAuthenticated, async (req, res) => {
     try {
       const budgets = await storage.getAccountBudgets();
@@ -697,7 +705,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error creating budget:", error);
         res.status(500).json({ message: "Failed to create budget" });
       }
-    }
+    },
   );
 
   app.patch(
@@ -714,7 +722,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         const oldBudget = await storage.getAccountBudgetById(parseInt(id));
         const budget = await storage.updateAccountBudget(
           parseInt(id),
-          req.body
+          req.body,
         );
 
         if (!budget) {
@@ -736,7 +744,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error updating budget:", error);
         res.status(500).json({ message: "Failed to update budget" });
       }
-    }
+    },
   );
 
   app.delete(
@@ -765,11 +773,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error deleting budget:", error);
         res.status(500).json({ message: "Failed to delete budget" });
       }
-    }
+    },
   );
 
-  // Voucher attachment routes
-  // 1. GET Attachments
+  // ── Voucher Attachments ───────────────────────────────────────
   app.get(
     "/api/vouchers/:id/attachments",
     isAuthenticated,
@@ -782,16 +789,14 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error fetching attachments:", error);
         res.status(500).json({ message: "Failed to fetch attachments" });
       }
-    }
+    },
   );
 
-  // 2. POST Attachment (Upload)
   app.post(
     "/api/vouchers/:id/attachments",
     isAuthenticated,
-    upload.single("file"), // Middleware processes file before the async function below
+    upload.single("file"),
     async (req: any, res: any) => {
-      // Validation: Did Multer receive a file?
       if (!req.file) {
         return res.status(400).json({ message: "No file uploaded" });
       }
@@ -799,16 +804,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       const { id } = req.params;
       const voucherId = parseInt(id);
 
-      // Validation: Invalid ID?
       if (isNaN(voucherId)) {
-        // Clean up uploaded file since request is invalid
         fs.unlinkSync(req.file.path);
         return res.status(400).json({ message: "Invalid voucher ID" });
       }
-
-      console.log(
-        `[Upload] Received file for Voucher ${voucherId}: ${req.file.originalname}`
-      );
 
       try {
         const userId = req.user?.id
@@ -817,36 +816,30 @@ export async function registerRoutes(app: Express): Promise<void> {
             : req.user.id
           : null;
         if (!userId) {
-          fs.unlinkSync(req.file.path); // Cleanup
+          fs.unlinkSync(req.file.path);
           return res.status(401).json({ message: "Unauthorized" });
         }
 
-        // Check if Voucher Exists
         const voucher = await storage.getVoucherById(voucherId);
         if (!voucher) {
-          fs.unlinkSync(req.file.path); // Cleanup
+          fs.unlinkSync(req.file.path);
           return res.status(404).json({ message: "Voucher not found" });
         }
 
-        // Calculate Relative Path for DB (e.g., "server/uploads/123-file.pdf")
         const relativePath = path.relative(process.cwd(), req.file.path);
 
-        // Prepare DB Record
         const attachmentData = {
           voucherId: voucherId,
           fileName: req.file.originalname,
           fileType: req.file.mimetype,
           fileSize: req.file.size,
-          filePath: relativePath, // MATCHES SCHEMA NOW
+          filePath: relativePath,
           uploadedById: userId,
         };
 
-        // Insert into DB
-        const attachment = await storage.createVoucherAttachment(
-          attachmentData
-        );
+        const attachment =
+          await storage.createVoucherAttachment(attachmentData);
 
-        // Audit Log (Fire and forget)
         storage
           .createAuditLog({
             entityType: "voucher",
@@ -858,26 +851,21 @@ export async function registerRoutes(app: Express): Promise<void> {
           })
           .catch((err) => console.error("Audit log failed:", err));
 
-        console.log(`[Upload] Success: Attachment ID ${attachment.id}`);
         res.status(201).json(attachment);
       } catch (error) {
         console.error("[Upload] Error:", error);
-
-        // Cleanup file if DB insert failed
         if (req.file?.path && fs.existsSync(req.file.path)) {
           fs.unlink(req.file.path, (err) => {
             if (err) console.error("Cleanup failed:", err);
           });
         }
-
         return res
           .status(500)
           .json({ message: "Failed to save attachment record" });
       }
-    }
+    },
   );
 
-  // 3. DELETE Attachment
   app.delete(
     "/api/vouchers/:id/attachments/:attachmentId",
     isAuthenticated,
@@ -885,11 +873,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       try {
         const { attachmentId } = req.params;
         const attachment = await storage.getVoucherAttachmentById(
-          parseInt(attachmentId)
+          parseInt(attachmentId),
         );
 
         if (attachment) {
-          // 1. Delete file from disk
           const fullPath = path.resolve(process.cwd(), attachment.filePath);
           if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
@@ -897,10 +884,8 @@ export async function registerRoutes(app: Express): Promise<void> {
             console.warn(`[Delete] File not found on disk: ${fullPath}`);
           }
 
-          // 2. Delete record from DB
           await storage.deleteVoucherAttachment(parseInt(attachmentId));
 
-          // 3. Audit Log
           const userId = req.user?.id
             ? typeof req.user.id === "string"
               ? parseInt(req.user.id)
@@ -924,10 +909,9 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Error deleting attachment:", error);
         res.status(500).json({ message: "Failed to delete attachment" });
       }
-    }
+    },
   );
 
-  // 4. VIEW Attachment (inline display)
   app.get("/api/attachments/:id/view", isAuthenticated, async (req, res) => {
     try {
       const { id } = req.params;
@@ -944,8 +928,6 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
 
       res.setHeader("Content-Type", attachment.fileType);
-      // No Content-Disposition header for inline viewing
-
       const fileStream = fs.createReadStream(fullPath);
       fileStream.pipe(res);
     } catch (error) {
@@ -954,7 +936,6 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
-  // 5. DOWNLOAD Attachment
   app.get(
     "/api/attachments/:id/download",
     isAuthenticated,
@@ -976,7 +957,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         res.setHeader("Content-Type", attachment.fileType);
         res.setHeader(
           "Content-Disposition",
-          `attachment; filename="${attachment.fileName}"`
+          `attachment; filename="${attachment.fileName}"`,
         );
 
         const fileStream = fs.createReadStream(fullPath);
@@ -985,10 +966,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         console.error("Download error:", error);
         res.status(500).json({ message: "Failed to download file" });
       }
-    }
+    },
   );
 
-  // Disbursement summary reports route
+  // ── Disbursement Summary Report ───────────────────────────────
   app.get(
     "/api/reports/disbursement-summary",
     isAuthenticated,
@@ -1001,9 +982,9 @@ export async function registerRoutes(app: Express): Promise<void> {
           : new Date(new Date().getFullYear(), 0, 1);
         const end = endDate ? new Date(endDate as string) : new Date();
 
-        const vouchers = await storage.getVouchersWithRelations();
+        const vouchersList = await storage.getVouchersWithRelations();
 
-        const filteredVouchers = vouchers.filter((v: any) => {
+        const filteredVouchers = vouchersList.filter((v: any) => {
           const voucherDate = new Date(v.date);
           return (
             voucherDate >= start &&
@@ -1012,7 +993,6 @@ export async function registerRoutes(app: Express): Promise<void> {
           );
         });
 
-        // Group by chart of account if requested
         const summary: any = {
           totalAmount: 0,
           totalVat: 0,
@@ -1024,25 +1004,26 @@ export async function registerRoutes(app: Express): Promise<void> {
         };
 
         filteredVouchers.forEach((v: any) => {
-          // Sum amounts from all items in the voucher
-          let voucherAmount = 0;
+          let voucherNonVat = 0;
+          let voucherVatableBase = 0;
           let voucherVat = 0;
           let voucherWithheld = 0;
 
           v.items?.forEach((item: any) => {
-            voucherAmount += parseFloat(item.amount) || 0;
+            voucherNonVat += parseFloat(item.nonVatAmount || "0");
+            voucherVatableBase += parseFloat(item.amount || "0");
             voucherVat += parseFloat(item.vatAmount || "0");
             voucherWithheld += parseFloat(item.amountWithheld || "0");
           });
 
-          const netAmount = voucherAmount; // For now, net amount is total amount
+          // totalAmount = nonVat + vatableBase + vat (gross before EWT)
+          const voucherGross = voucherNonVat + voucherVatableBase + voucherVat;
 
-          summary.totalAmount += voucherAmount;
+          summary.totalAmount += voucherGross;
           summary.totalVat += voucherVat;
           summary.totalWithheld += voucherWithheld;
-          summary.totalNetAmount += netAmount;
+          summary.totalNetAmount += voucherGross - voucherWithheld;
 
-          // Group by account - now we need to group by each item's account
           v.items?.forEach((item: any) => {
             const accountCode = item.chartOfAccount?.code || "Uncategorized";
             if (!summary.byAccount[accountCode]) {
@@ -1056,18 +1037,20 @@ export async function registerRoutes(app: Express): Promise<void> {
                 count: 0,
               };
             }
-            const itemAmount = parseFloat(item.amount) || 0;
+            const itemNonVat = parseFloat(item.nonVatAmount || "0");
+            const itemBase = parseFloat(item.amount || "0");
             const itemVat = parseFloat(item.vatAmount || "0");
             const itemWithheld = parseFloat(item.amountWithheld || "0");
+            const itemGross = itemNonVat + itemBase + itemVat;
 
-            summary.byAccount[accountCode].amount += itemAmount;
+            summary.byAccount[accountCode].amount += itemGross;
             summary.byAccount[accountCode].vat += itemVat;
             summary.byAccount[accountCode].withheld += itemWithheld;
-            summary.byAccount[accountCode].netAmount += itemAmount;
+            summary.byAccount[accountCode].netAmount +=
+              itemGross - itemWithheld;
             summary.byAccount[accountCode].count += 1;
           });
 
-          // Group by month
           const monthKey = new Date(v.date).toISOString().slice(0, 7);
           if (!summary.byMonth[monthKey]) {
             summary.byMonth[monthKey] = {
@@ -1079,10 +1062,10 @@ export async function registerRoutes(app: Express): Promise<void> {
               count: 0,
             };
           }
-          summary.byMonth[monthKey].amount += voucherAmount;
+          summary.byMonth[monthKey].amount += voucherGross;
           summary.byMonth[monthKey].vat += voucherVat;
           summary.byMonth[monthKey].withheld += voucherWithheld;
-          summary.byMonth[monthKey].netAmount += netAmount;
+          summary.byMonth[monthKey].netAmount += voucherGross - voucherWithheld;
           summary.byMonth[monthKey].count += 1;
         });
 
@@ -1097,7 +1080,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           },
           byAccount: Object.values(summary.byAccount),
           byMonth: Object.values(summary.byMonth).sort((a: any, b: any) =>
-            a.month.localeCompare(b.month)
+            a.month.localeCompare(b.month),
           ),
         });
       } catch (error) {
@@ -1106,6 +1089,6 @@ export async function registerRoutes(app: Express): Promise<void> {
           .status(500)
           .json({ message: "Failed to generate disbursement summary" });
       }
-    }
+    },
   );
 }

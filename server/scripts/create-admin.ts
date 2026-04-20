@@ -7,13 +7,14 @@ dotenv.config({ path: envPath });
 
 async function run() {
   try {
-    // Dynamic import after env is loaded
-    const { hashPassword } = await import("../auth");
-    const { storage } = await import("../storage");
-    const username = process.env.ADMIN_USERNAME || "admin";
-    const password = process.env.ADMIN_PASSWORD || "admin";
-    const firstName = process.env.ADMIN_FIRSTNAME || "Admin";
-    const lastName = process.env.ADMIN_LASTNAME || "User";
+    // ✅ FIX: Add .ts extension in dynamic imports
+    const { hashPassword } = await import("../auth.ts");
+    const { storage } = await import("../storage.ts");
+
+    const username = process.env.ADMIN_USERNAME || "sample";
+    const password = process.env.ADMIN_PASSWORD || "sample";
+    const firstName = process.env.ADMIN_FIRSTNAME || "sample";
+    const lastName = process.env.ADMIN_LASTNAME || "sample";
 
     const existing = await storage.getUserByUsername(username);
     if (existing) {
@@ -22,18 +23,20 @@ async function run() {
     }
 
     const hashed = await hashPassword(password);
+
     const user = await storage.createUser({
       username,
       password: hashed,
       firstName,
       lastName,
-      role: "admin",
+      role: "approver",
     });
 
     console.log("Created admin user:", {
       id: user.id,
       username: user.username,
     });
+
     process.exit(0);
   } catch (err) {
     console.error("Failed to create admin:", err);
